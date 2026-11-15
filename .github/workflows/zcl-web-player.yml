@@ -1,0 +1,189 @@
+# ZC Land's web player. Once a day this checks ZQuest Classic's main branch and, when it has a commit without a
+# release here, builds the web player (zplayer only) from that commit, applies ZC Land's edits
+# (zcl/patch_web_package.py, from this fork's zcl branch), and publishes a release web-player-<commit> holding
+# zcl-web-player.tar.gz and its .sha256. ZC Land's site pins one release by tag
+# (site/plugins/zcl-portal/config/zc_player.json in zcland/zcl) and installs it on deploy.
+#
+# The zcl branch (the default) is upstream's main plus files only ZC Land adds (this workflow and zcl/), so merging
+# upstream never conflicts; main mirrors upstream. Keeping those branches current is best effort: GitHub's workflow
+# token may not push upstream's own workflow changes, so add a ZCL_SYNC_TOKEN secret (a fine-grained token with
+# Contents and Workflows write on this repository) for that. The build never depends on it: it checks out upstream's
+# commit itself. Upstream's own workflows are turned off in this fork.
+name: ZC Land web player
+
+on:
+  schedule:
+    - cron: '23 7 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even if this upstream commit already has a release
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: zcl-web-player
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+      tag: ${{ steps.check.outputs.tag }}
+      upstream: ${{ steps.check.outputs.upstream }}
+      fork: ${{ steps.check.outputs.fork }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: zcl
+          fetch-depth: 0
+          lfs: false
+          token: ${{ secrets.ZCL_SYNC_TOKEN || github.token }}
+
+      - name: Keep main and zcl up to date with ZQuest Classic
+        id: merge
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.ZCL_SYNC_TOKEN || github.token }}
+        run: |
+          gh api -X POST "repos/${{ github.repository }}/merge-upstream" -f branch=main
+          git config user.name "ZC Land web player"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git merge --no-edit origin/main
+          git push origin HEAD:zcl
+
+      - name: Is there a release for upstream's latest commit?
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "fork=$(git rev-parse origin/zcl 2>/dev/null || git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          upstream=$(git ls-remote https://github.com/ZQuestClassic/ZQuestClassic.git refs/heads/main | cut -f1)
+          test -n "$upstream"
+          tag="web-player-${upstream:0:12}"
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1 && [ "${{ inputs.force }}" != "true" ]; then
+            echo "Already released as $tag."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.build == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      # The build fills most of the runner's disk; remove toolchains it never uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/share/powershell /usr/share/swift /usr/local/lib/node_modules /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2.2.0
+        with:
+          cmake-version: '3.31.6'
+
+      # Upstream's commit, as any clone of it. Its large files (the bundled quests and tilesets) come from ZQuest
+      # Classic's LFS store, so this fork needs none of its own.
+      - uses: actions/checkout@v5
+        with:
+          repository: ZQuestClassic/ZQuestClassic
+          ref: ${{ needs.sync.outputs.upstream }}
+          lfs: false
+
+      # The version header comes from `git describe`: it needs history and tags, not old file contents.
+      - name: Fetch history
+        run: git fetch --filter=blob:none --unshallow --tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+      - name: Large files
+        run: |
+          git lfs install --local
+          git lfs pull --include="resources/**"
+
+      # ZC Land's additions, from this fork's zcl branch.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.sync.outputs.fork }}
+          path: .zcl-fork
+          sparse-checkout: zcl
+          lfs: false
+
+      - name: Install emsdk
+        run: |
+          version=$(sed -n 's/^EMCC_VERSION=//p' scripts/configure_emscripten.sh)
+          test -n "$version"
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git ~/emsdk
+          ~/emsdk/emsdk install "$version"
+          ~/emsdk/emsdk activate "$version"
+          source ~/emsdk/emsdk_env.sh
+          echo "$EMSDK" >> "$GITHUB_PATH"
+          echo "$EMSDK/upstream/emscripten" >> "$GITHUB_PATH"
+          echo "EMSDK=$EMSDK" >> "$GITHUB_ENV"
+          echo "EMSDK_NODE=$EMSDK_NODE" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.x
+
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build flex bison
+
+      - name: unsf (converts the MIDI soundfonts)
+        run: |
+          git clone --depth 1 https://github.com/psi29a/unsf.git ~/unsf
+          cmake -S ~/unsf -B ~/unsf/build
+          cmake --build ~/unsf/build
+          echo "UNSF=$HOME/unsf/build/unsf-static" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          git config --global user.email "zcl-web-player@users.noreply.github.com"
+          git config --global user.name "ZC Land web player"
+          bash scripts/configure_emscripten.sh
+
+      # Linking with --asyncify needs more memory than the runner has.
+      - name: Add swap space
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+
+      - name: Build the player
+        run: cmake --build build_emscripten --config Release -t web_zplayer
+
+      - name: Apply ZC Land's edits and package
+        run: |
+          package=build_emscripten/Release/packages/web
+          python3 -I .zcl-fork/zcl/patch_web_package.py "$package" \
+            --fork-commit "${{ needs.sync.outputs.fork }}" \
+            --upstream-commit "${{ needs.sync.outputs.upstream }}" \
+            --repository "${{ github.repository }}"
+          tar -C "$package" -czf zcl-web-player.tar.gz .
+          sha256sum zcl-web-player.tar.gz | cut -d' ' -f1 > zcl-web-player.tar.gz.sha256
+          ls -l zcl-web-player.tar.gz
+          tar -tzf zcl-web-player.tar.gz | head -50
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ needs.sync.outputs.tag }}"
+          gh release delete "$tag" --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" zcl-web-player.tar.gz zcl-web-player.tar.gz.sha256 \
+            --repo "${{ github.repository }}" --target "${{ needs.sync.outputs.fork }}" --latest \
+            --title "Web player, ZQuest Classic ${{ needs.sync.outputs.upstream }}" \
+            --notes "ZC Land's web player: ZQuest Classic $(echo ${{ needs.sync.outputs.upstream }} | cut -c1-12) (upstream main), with zcl/patch_web_package.py from ${{ needs.sync.outputs.fork }}. Pin it in zcland/zcl's site/plugins/zcl-portal/config/zc_player.json."
