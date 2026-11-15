@@ -138,7 +138,16 @@ jobs:
         with:
           node-version: 22.x
 
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build flex bison
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build flex bison ccache
+
+      # Compiled objects are cached between builds, so a build after a small upstream change is quick.
+      - name: Restore the compile cache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: zcl-web-ccache-${{ github.run_id }}
+          restore-keys: zcl-web-ccache-
 
       - name: unsf (converts the MIDI soundfonts)
         run: |
@@ -148,6 +157,8 @@ jobs:
           echo "UNSF=$HOME/unsf/build/unsf-static" >> "$GITHUB_ENV"
 
       - name: Configure
+        env:
+          ZC_EMCC_CMAKE_EXTRA_FLAGS: -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
         run: |
           git config --global user.email "zcl-web-player@users.noreply.github.com"
           git config --global user.name "ZC Land web player"
@@ -163,7 +174,19 @@ jobs:
           sudo swapon /mnt/swapfile
 
       - name: Build the player
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_MAXSIZE: 800M
+          CCACHE_SLOPPINESS: time_macros
+          CCACHE_COMPILERCHECK: content
         run: cmake --build build_emscripten --config Release -t web_zplayer
+
+      - name: Save the compile cache
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
 
       - name: Apply ZC Land's edits and package
         run: |

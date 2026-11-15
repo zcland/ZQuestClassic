@@ -8,7 +8,7 @@ player that still reaches out to ZQuest Classic's servers.
 - No quest data from ZQuest Classic: the player's data origin (its quest list and quest files) becomes an empty list
   served with the player (zcl-data/manifest.json), and the preload of ZC's list is removed. ZC Land opens each quest
   by its own address on www.zcland.net.
-- No analytics, and no service worker (ZC Land versions the player's address instead).
+- No analytics, no service worker (ZC Land versions the player's address instead), and never CI mode.
 - An embedded mode (#embed in the address): only the game's screen, filling the frame.
 - SOURCE.txt says where the source is (the GPL's offer), and VERSION.json which commits were built.
 """
@@ -48,6 +48,10 @@ edit(page, r'\s*<link rel="(?:preload|preconnect)" href="https://data\.zquestcla
 # Analytics.
 edit(page, r'\s*<script async src="https://www\.googletagmanager\.com/[^"]*"></script>\s*<script>[^<]*gtag\([^<]*</script>', '', count=1)
 
+# CI mode: create_html.py turns it on when the build runs on a CI service (as this one does), which changes how the
+# player behaves. Players never want it.
+edit(page, r'var IS_CI = (?:true|false);', 'var IS_CI = false;', count=1)
+
 # The service worker.
 edit(page, r'''navigator\.serviceWorker\.register\((['"])\.\./sw\.js\1\);?''', '', count=1)
 for name in ('sw.js', 'sw.js.map'):
@@ -59,7 +63,7 @@ for worker in web.glob('workbox-*.js*'):
 embed = '''
   <style>
     html.zcl-embed, html.zcl-embed body { margin: 0; height: 100%; overflow: hidden; background: #000; }
-    html.zcl-embed header, html.zcl-embed .panel, html.zcl-embed .content { display: none !important; }
+    html.zcl-embed header, html.zcl-embed .panel { display: none !important; }
   </style>
   <script>
     if (/(^|[#&])embed(&|$)/.test(location.hash.slice(1))) document.documentElement.classList.add('zcl-embed');
