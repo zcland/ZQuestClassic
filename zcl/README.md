@@ -11,6 +11,8 @@ Database in the browser. It is ZQuest Classic plus these files:
   are tagged `web-player-<commit>-p<patches>`, so a changed patch never replaces a pinned release.
   - `web-canvas-device-pixels.patch`: the canvas is drawn at its displayed size in device pixels, so the game is scaled
     by a whole number and every game pixel is the same size (upstream stretches a 640x480 canvas by a fractional factor).
+  - `web-quit-label.patch`: the standalone quit screen says QUIT instead of QUIT TO DESKTOP in the browser, where
+    quitting ends the player and ZC Land's Arcade page takes over.
 - `zcl/patch_web_package.py`: ZC Land's edits to the built player. It removes analytics, the service worker, and every
   request to ZQuest Classic's quest data, and adds an embedded mode (`#embed`) that shows only the game's screen.
 

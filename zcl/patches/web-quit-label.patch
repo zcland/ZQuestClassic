@@ -1,0 +1,27 @@
+ZC Land: the standalone quit screen says QUIT in the web player, not QUIT TO DESKTOP.
+
+The Arcade opens every quest in standalone mode. In the browser there is no desktop: quitting ends
+the player, and the Arcade page closes the game and shows its Play cover. Desktop builds keep
+QUIT TO DESKTOP.
+
+Applied by .github/workflows/zcl-web-player.yml to upstream's checkout before building (git apply).
+If upstream changes this code, the apply fails and the build stops; refresh the patch.
+
+diff --git a/src/zc/title.cpp b/src/zc/title.cpp
+index 6e253cf8e..e17f9d546 100644
+--- a/src/zc/title.cpp
++++ b/src/zc/title.cpp
+@@ -1919,7 +1919,13 @@ static StandaloneQuitChoice standalone_quit_screen()
+ 	if (standalone_quit_choice_for_test)
+ 		return *standalone_quit_choice_for_test;
+ 
++#ifdef __EMSCRIPTEN__
++	// In the browser there is no desktop to return to: quitting ends the player, and the page around it
++	// takes over.
++	const char* rows[] = { "QUIT", "LOAD LAST SAVE" };
++#else
+ 	const char* rows[] = { "QUIT TO DESKTOP", "LOAD LAST SAVE" };
++#endif
+ 	const int32_t num_rows = 2;
+ 	// Styled like the continue screen.
+ 	int32_t text_color = SaveScreenSettings[SAVESC_TEXT_CONTINUE_COLOUR] > 0 ? SaveScreenSettings[SAVESC_TEXT_CONTINUE_COLOUR] : QMisc.colors.msgtext;
