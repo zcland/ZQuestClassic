@@ -1,0 +1,204 @@
+ZC Land: draw the web player's canvas at its displayed size in device pixels.
+
+Upstream sizes the web backbuffer to the virtual screen (640x480) unless a CRT filter is on, and CSS
+stretches the canvas by a fractional factor (min(innerWidth/640, height/480)) with image-rendering:
+pixelated. The game sits in that 640x480 at a whole 2x, so on screen each game pixel is 2 x that
+factor device pixels - at 1.6x, 3.2, rounded into columns 3 and 4 wide. Almost no window size gives
+a whole number, so game pixels come out uneven at nearly every size, in a pane and in full screen.
+
+With this, the backbuffer always follows the canvas's displayed size in device pixels (bufW/bufH
+from window.zcCanvasSize), filter or not, and main.js sizes the canvas box in device pixels so it
+maps 1:1 at any devicePixelRatio. configure_render_tree then scales the game by a whole number
+(scaling_force_integer, on by default) and letterboxes it. The rule for a page smaller than the
+virtual screen is unchanged: the backbuffer never goes below 640x480, and a CRT filter turns off.
+
+Applied by .github/workflows/zcl-web-player.yml to upstream's checkout before building (git apply).
+If upstream changes this code, the apply fails and the build stops; refresh the patch.
+
+diff --git a/src/zalleg/zalleg.cpp b/src/zalleg/zalleg.cpp
+index cae3de416..068890e4a 100644
+--- a/src/zalleg/zalleg.cpp
++++ b/src/zalleg/zalleg.cpp
+@@ -536,10 +536,9 @@ void zalleg_create_window(const char* title, int gfx_mode, int v_width, int v_he
+ 	}
+ 
+ #ifdef __EMSCRIPTEN__
+-	// For web, there's normally no point making the display size different from the virtual
+-	// screen size, because the canvas that SDL renders into is scaled up via CSS. The exception
+-	// is when a display shader needs real output pixels to work with - see
+-	// zalleg_set_web_display_size.
++	// For web, the display is the size the page shows the canvas at, in device pixels (see
++	// crt_filter_update_web_display_size), so the browser never resamples it. Falls back to the
++	// virtual screen size if the page reported none.
+ 	int w = web_display_w > 0 ? web_display_w : v_width;
+ 	int h = web_display_h > 0 ? web_display_h : v_height;
+ #else
+diff --git a/src/zc/crt_filter.cpp b/src/zc/crt_filter.cpp
+index 27c94e26a..dce570a40 100644
+--- a/src/zc/crt_filter.cpp
++++ b/src/zc/crt_filter.cpp
+@@ -780,29 +780,30 @@ static bool web_viewport_too_small;
+ void crt_filter_update_web_display_size()
+ {
+ #ifdef __EMSCRIPTEN__
+-	int w = 0, h = 0;
+-	web_viewport_too_small = false;
+-	if (crt_filter_get_mode() != CrtFilterMode::none)
+-	{
+-		int size[3] = {};
+-		EM_ASM({
+-			var s = window.zcCanvasSize ? window.zcCanvasSize() : null;
+-			HEAP32[$0 >> 2] = s ? s.bufW : 0;
+-			HEAP32[($0 >> 2) + 1] = s ? s.bufH : 0;
+-			HEAP32[($0 >> 2) + 2] = s ? Math.round(s.cssW * devicePixelRatio) : 0;
+-		}, size);
+-		// bufW never shrinks below the virtual screen, so when the page's box is smaller
+-		// than that in device pixels, the browser would have to downsample the shaded
+-		// output - re-creating exactly the resampling moire the full-res backbuffer exists
+-		// to avoid. Render unfiltered instead; growing the viewport re-enables the filter
+-		// (this runs again on every resize via zc_web_display_size_changed).
+-		web_viewport_too_small = size[2] > 0 && size[2] < size[0];
+-		if (!web_viewport_too_small)
+-		{
+-			w = size[0];
+-			h = size[1];
+-		}
+-	}
++	// The backbuffer always matches the size the canvas is displayed at, in device pixels, so
++	// the browser shows it 1:1 and never resamples it. That matters with or without a filter:
++	// - A display shader's scanlines and mask turn into moire if the browser rescales them.
++	// - Unfiltered, the alternative is a virtual-screen-sized (640x480) canvas stretched by CSS,
++	//   almost always by a fractional factor, which `image-rendering: pixelated` rounds into
++	//   game pixels of alternating widths (at 1.6x, every game pixel is 3.2 device pixels: some
++	//   3 wide, some 4). Drawn at full size instead, configure_render_tree scales the game by a
++	//   whole number (scaling_force_integer) and letterboxes it, so every pixel is the same.
++	int size[3] = {};
++	EM_ASM({
++		var s = window.zcCanvasSize ? window.zcCanvasSize() : null;
++		HEAP32[$0 >> 2] = s ? s.bufW : 0;
++		HEAP32[($0 >> 2) + 1] = s ? s.bufH : 0;
++		HEAP32[($0 >> 2) + 2] = s ? Math.round(s.cssW * devicePixelRatio) : 0;
++	}, size);
++	int w = size[0];
++	int h = size[1];
++	// bufW never shrinks below the virtual screen, so when the page's box is smaller than that
++	// in device pixels, the browser has to downsample the canvas. For a display shader that
++	// re-creates exactly the resampling moire the full-res backbuffer exists to avoid, so render
++	// unfiltered instead; growing the viewport re-enables the filter (this runs again on every
++	// resize via zc_web_display_size_changed).
++	web_viewport_too_small = crt_filter_get_mode() != CrtFilterMode::none &&
++		size[2] > 0 && size[2] < size[0];
+ 
+ 	ALLEGRO_DISPLAY* display = all_get_display();
+ 	if (!display)
+@@ -812,11 +813,10 @@ void crt_filter_update_web_display_size()
+ 		return;
+ 	}
+ 
+-	// With no filter the canvas goes back to the virtual screen size, which CSS scales up.
+-	// Neither obvious spelling of that works: SCREEN_W/SCREEN_H are gfx_driver->w/h, which track
+-	// the *display*, so the shrink-back condition below could never be true; and the global
+-	// `screen` is repointed at a popup's own bitmap while one is open - which is always, since
+-	// this runs from the CRT Filter menu callback, so it read the menu's size instead.
++	// No size from the page (main.js not loaded): fall back to the virtual screen size.
++	// SCREEN_W/SCREEN_H would not do here: they are gfx_driver->w/h, which track the *display*;
++	// and the global `screen` is repointed at a popup's own bitmap while one is open - which is
++	// always, when this runs from the CRT Filter menu callback.
+ 	if (w <= 0 || h <= 0)
+ 	{
+ 		auto [vw, vh] = zalleg_get_virtual_display_size();
+@@ -833,9 +833,9 @@ void crt_filter_update_web_display_size()
+ }
+ 
+ #ifdef __EMSCRIPTEN__
+-// Called from web/main.js whenever the page viewport changes. While a filter is active the
+-// backbuffer has to keep matching the size the canvas is displayed at, so the display has to
+-// be resized along with the page - most visibly when going fullscreen.
++// Called from web/main.js whenever the page viewport changes. The backbuffer has to keep
++// matching the size the canvas is displayed at, so the display has to be resized along with
++// the page - most visibly when going fullscreen.
+ extern "C" void zc_web_display_size_changed()
+ {
+ 	crt_filter_update_web_display_size();
+diff --git a/src/zc/zelda.cpp b/src/zc/zelda.cpp
+index 8b5a08172..8692a7e02 100644
+--- a/src/zc/zelda.cpp
++++ b/src/zc/zelda.cpp
+@@ -4081,8 +4081,9 @@ static void init_display()
+ 	// shaders with this flag, so all other drawing is unaffected.
+ 	all_set_display_flags(all_get_display_flags() | ALLEGRO_PROGRAMMABLE_PIPELINE);
+ 
+-	// The web canvas is normally the virtual screen size and enlarged by CSS, but the CRT
+-	// filters need real output pixels - at ~2x scale their scanlines only alias.
++	// The web canvas is created at the size it is displayed at, in device pixels, so the browser
++	// never resamples it: the game gets whole-number pixels, and the CRT filters real output
++	// pixels to work with.
+ 	crt_filter_update_web_display_size();
+ 
+ 	zalleg_create_window(window_title, gfx_mode, zq_screen_w, zq_screen_h, saved_window_width, saved_window_height);
+diff --git a/web/main.js b/web/main.js
+index 6aac9762e..bcd520fa9 100644
+--- a/web/main.js
++++ b/web/main.js
+@@ -360,26 +360,33 @@ const VIRTUAL_H = 480;
+ let runtimeReady = false;
+ 
+ // Single source of truth for canvas geometry, also read from C++ (see
+-// crt_filter_update_web_display_size). cssW/cssH is the largest 4:3 box that fits on the page.
+-// It is authoritative and is never derived from the backbuffer: allegro sizes the backbuffer by
+-// scaling the CSS size, so deriving one from the other in both directions makes the two chase
+-// each other. bufW/bufH is that same box measured in physical pixels. A display shader must
+-// render into exactly bufW x bufH, because any other backbuffer size makes the browser resample
+-// the shaded image, which turns its scanlines and mask into moire.
++// crt_filter_update_web_display_size). It is the largest 4:3 box that fits on the page, measured
++// in device pixels first and converted to CSS pixels after, so that the box is a whole number of
++// device pixels at any devicePixelRatio (1.25 and 1.5 are common on Windows). It is
++// authoritative and is never derived from the backbuffer: allegro sizes the backbuffer from this,
++// so deriving one from the other in both directions makes the two chase each other.
++// bufW/bufH is the box in device pixels, and the backbuffer is always that size, so the browser
++// shows the canvas 1:1 and never resamples it. Resampling is what makes game pixels come out
++// uneven (a 640x480 canvas stretched 1.6x rounds each game pixel to 3 or 4 device pixels), and
++// what turns a display shader's scanlines and mask into moire.
+ function canvasSize() {
+   // <main> is what goes fullscreen, so the header is off screen then - but it is still laid out
+   // and still reports its height, and subtracting it would waste a band of the screen.
+   const headerH = document.fullscreenElement ? 0 : document.querySelector('header').clientHeight;
+   const heightAvail = innerHeight - headerH;
+-  const scale = Math.min(innerWidth / VIRTUAL_W, heightAvail / VIRTUAL_H);
+-  const cssW = Math.max(0, Math.floor(VIRTUAL_W * scale));
+-  const cssH = Math.max(0, Math.floor(VIRTUAL_H * scale));
++  const dpr = devicePixelRatio || 1;
++  const scale = Math.min(Math.floor(innerWidth * dpr) / VIRTUAL_W, Math.floor(heightAvail * dpr) / VIRTUAL_H);
++  const boxW = Math.max(0, Math.floor(VIRTUAL_W * scale));
++  const boxH = Math.max(0, Math.floor(VIRTUAL_H * scale));
+   return {
+-    cssW, cssH,
++    // Fractional CSS sizes are fine: boxW / dpr CSS pixels lay out as exactly boxW device pixels.
++    cssW: boxW / dpr,
++    cssH: boxH / dpr,
+     // Never smaller than the virtual screen: the display is created at bufW x bufH, and a page
+-    // that is hidden or still laying out reports a zero-sized viewport.
+-    bufW: Math.max(VIRTUAL_W, Math.round(cssW * devicePixelRatio)),
+-    bufH: Math.max(VIRTUAL_H, Math.round(cssH * devicePixelRatio)),
++    // that is hidden or still laying out reports a zero-sized viewport. Only then does the
++    // browser scale the canvas (down, to fit a page smaller than 640x480 device pixels).
++    bufW: Math.max(VIRTUAL_W, boxW),
++    bufH: Math.max(VIRTUAL_H, boxH),
+   };
+ }
+ window.zcCanvasSize = canvasSize;
+@@ -388,9 +395,11 @@ function applyCanvasCss() {
+   const {cssW, cssH} = canvasSize();
+   canvas.style.width = cssW + "px";
+   canvas.style.height = cssH + "px";
+-  // A backbuffer larger than the virtual screen means a display shader already shaded this at
+-  // device resolution - nearest-neighbor would re-alias what it just drew.
+-  canvas.style.imageRendering = canvas.width > VIRTUAL_W ? 'auto' : '';
++  // The canvas is normally shown 1:1, where the browser's scaling filter makes no difference. It
++  // only scales the canvas briefly while a resize is pending, or down when the page is smaller
++  // than the virtual screen. Nearest-neighbor suits pixel art, but shrinking with it drops whole
++  // rows and columns (and re-aliases a display shader's output), so smooth only when shrinking.
++  canvas.style.imageRendering = canvas.width > Math.round(cssW * devicePixelRatio) ? 'auto' : '';
+ }
+ 
+ function resize() {

@@ -80,7 +80,8 @@ for path in [page, main]:
 (web / 'SOURCE.txt').write_text(
     'ZC Land\'s web player is ZQuest Classic (GPL-3.0), built from\n'
     f'https://github.com/{args.repository}/tree/{args.fork_commit}\n'
-    f'which merges ZQuest Classic {args.upstream_commit} (https://github.com/ZQuestClassic/ZQuestClassic).\n',
+    f'which merges ZQuest Classic {args.upstream_commit} (https://github.com/ZQuestClassic/ZQuestClassic),\n'
+    'with the source patches in that commit\'s zcl/patches folder applied.\n',
     encoding='utf-8')
 (web / 'VERSION.json').write_text(json.dumps({
     'fork_commit': args.fork_commit, 'upstream_commit': args.upstream_commit, 'repository': args.repository,

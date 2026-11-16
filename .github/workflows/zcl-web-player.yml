@@ -1,7 +1,9 @@
 # ZC Land's web player. Once a day this checks ZQuest Classic's main branch and, when it has a commit without a
-# release here, builds the web player (zplayer only) from that commit, applies ZC Land's edits
-# (zcl/patch_web_package.py, from this fork's zcl branch), and publishes a release web-player-<commit> holding
-# zcl-web-player.tar.gz and its .sha256. ZC Land's site pins one release by tag
+# release here, builds the web player (zplayer only) from that commit with ZC Land's source patches applied
+# (zcl/patches/*.patch), applies ZC Land's edits to the built files (zcl/patch_web_package.py), both from this fork's
+# zcl branch, and publishes a release web-player-<commit>[-p<patches>] holding zcl-web-player.tar.gz and its .sha256.
+# The -p<patches> part (the zcl/patches folder's git tree hash) is there whenever there are patches, so changing a
+# patch makes a new release instead of replacing one the site may have pinned. ZC Land's site pins one release by tag
 # (site/plugins/zcl-portal/config/zc_player.json in zcland/zcl) and installs it on deploy.
 #
 # The zcl branch (the default) is upstream's main plus files only ZC Land adds (this workflow and zcl/), so merging
@@ -69,6 +71,9 @@ jobs:
           upstream=$(git ls-remote https://github.com/ZQuestClassic/ZQuestClassic.git refs/heads/main | cut -f1)
           test -n "$upstream"
           tag="web-player-${upstream:0:12}"
+          if patches=$(git rev-parse --verify --quiet HEAD:zcl/patches); then
+            tag="$tag-p${patches:0:8}"
+          fi
           echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1 && [ "${{ inputs.force }}" != "true" ]; then
@@ -120,6 +125,18 @@ jobs:
           path: .zcl-fork
           sparse-checkout: zcl
           lfs: false
+
+      # ZC Land's changes to upstream's sources, kept as patch files so the zcl branch only ever adds files. Each must
+      # apply cleanly; if upstream changed the code a patch touches, this stops the build - refresh the patch.
+      - name: Apply ZC Land's source patches
+        run: |
+          shopt -s nullglob
+          for patch in .zcl-fork/zcl/patches/*.patch; do
+            echo "Applying $patch"
+            git apply --check "$patch"
+            git apply "$patch"
+          done
+          git status --short
 
       - name: Install emsdk
         run: |
@@ -209,4 +226,4 @@ jobs:
           gh release create "$tag" zcl-web-player.tar.gz zcl-web-player.tar.gz.sha256 \
             --repo "${{ github.repository }}" --target "${{ needs.sync.outputs.fork }}" --latest \
             --title "Web player, ZQuest Classic ${{ needs.sync.outputs.upstream }}" \
-            --notes "ZC Land's web player: ZQuest Classic $(echo ${{ needs.sync.outputs.upstream }} | cut -c1-12) (upstream main), with zcl/patch_web_package.py from ${{ needs.sync.outputs.fork }}. Pin it in zcland/zcl's site/plugins/zcl-portal/config/zc_player.json."
+            --notes "ZC Land's web player: ZQuest Classic $(echo ${{ needs.sync.outputs.upstream }} | cut -c1-12) (upstream main), with zcl/patches and zcl/patch_web_package.py from ${{ needs.sync.outputs.fork }}. Pin it in zcland/zcl's site/plugins/zcl-portal/config/zc_player.json."
