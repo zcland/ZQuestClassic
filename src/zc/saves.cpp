@@ -43,6 +43,11 @@ static int currgame = -1;
 static std::vector<save_t> saves;
 static bool save_current_replay_games;
 
+// Sizes in a save come from the file and are allocated before anything is read into them, so
+// they need a limit. Scripts can grow an array well past the usual array size (reading a file
+// or a websocket message into it), so this is only far more than any real save holds.
+static const dword MAX_SAVED_ARRAY_SIZE = 1 << 24;
+
 static bool initialize_new_save(save_t* save, std::string& err);
 
 void save_t::unload()
@@ -331,7 +336,7 @@ static int32_t read_saves(ReadMode read_mode, PACKFILE* f, std::vector<save_t>& 
 		}
 		else if(section_version >= 37)
 		{
-			bounded_vec<word,byte> tmpbvec;
+			bounded_vec<word,byte> tmpbvec{game.lvlitems.size()};
 			if(!p_getbvec(&tmpbvec,f))
 				return 25;
 			for(dword q = 0; q < tmpbvec.capacity(); ++q)
@@ -497,7 +502,7 @@ static int32_t read_saves(ReadMode read_mode, PACKFILE* f, std::vector<save_t>& 
 				return 35;
 			if(section_version < 45)
 			{
-				bounded_vec<dword,word> tmpbvec;
+				bounded_vec<dword,word> tmpbvec{game.maps.size()};
 				if(!p_getbvec(&tmpbvec, f))
 					return 36;
 				game.maps.clear();
@@ -535,9 +540,10 @@ static int32_t read_saves(ReadMode read_mode, PACKFILE* f, std::vector<save_t>& 
 		if(!pfread(game.header.pal,sizeof(game.header.pal),f))
 			return 41;
 
+		// Masked for damaged files (see readcolordata).
 		if (section_version < 42)
 			for (int i = 0; i < sizeof(game.header.pal); i++)
-				game.header.pal[i] = _rgb_scale_6[game.header.pal[i]];
+				game.header.pal[i] = _rgb_scale_6[game.header.pal[i] & 63];
 
 		if(section_version < 37)
 		{
@@ -699,6 +705,9 @@ static int32_t read_saves(ReadMode read_mode, PACKFILE* f, std::vector<save_t>& 
 		if(tempdword != 0) //Might not be any at all
 		{
 			//Then we allocate the vector
+			// The number of old-style global arrays. Scripts can't make more than this.
+			if(tempdword > MAX_ZSCRIPT_INT)
+				return 53;
 			game.globalRAM.resize(tempdword);
 			
 			for(dword j = 0; j < game.globalRAM.size(); j++)
@@ -718,6 +727,8 @@ static int32_t read_saves(ReadMode read_mode, PACKFILE* f, std::vector<save_t>& 
 				}
 	
 				//We allocate the container
+				if(tempdword > MAX_SAVED_ARRAY_SIZE)
+					return 54;
 				a.Resize(tempdword);
 				a.setValid(true); //should always be valid
 
@@ -864,6 +875,8 @@ static int32_t read_saves(ReadMode read_mode, PACKFILE* f, std::vector<save_t>& 
 			{
 				byte dummybyte;
 				if(!p_igetw(&num_gen_scripts, f))
+					return 73;
+				if(num_gen_scripts > game.gen_exitState.size())
 					return 73;
 				for(size_t q=0; q<num_gen_scripts; q++)
 				{
@@ -1029,6 +1042,8 @@ static int32_t read_saves(ReadMode read_mode, PACKFILE* f, std::vector<save_t>& 
 					}
 
 					ZScriptArray zsarr;
+					if(arrsz > MAX_SAVED_ARRAY_SIZE)
+						return 97;
 					zsarr.Resize(arrsz);
 					zsarr.setObjectType((script_object_type)type);
 					zsarr.setValid(true); //should always be valid
@@ -1124,6 +1139,8 @@ static int32_t read_saves(ReadMode read_mode, PACKFILE* f, std::vector<save_t>& 
 			if(!p_igetl(&tempdword, f))
 				return 119;
 
+			if(tempdword > MAX_SCRIPT_ARRAYS)
+				return 119;
 			game.script_arrays.resize(tempdword);
 
 			for(dword j = 0; j < game.script_arrays.size(); j++)
@@ -1157,6 +1174,8 @@ static int32_t read_saves(ReadMode read_mode, PACKFILE* f, std::vector<save_t>& 
 				a.setObjectType((script_object_type)type);
 
 				//We allocate the container
+				if(tempdword > MAX_SAVED_ARRAY_SIZE)
+					return 119;
 				a.Resize(tempdword);
 				a.setValid(true); //should always be valid
 
@@ -1179,6 +1198,8 @@ static int32_t read_saves(ReadMode read_mode, PACKFILE* f, std::vector<save_t>& 
 			if(!p_igetl(&tempdword, f))
 				return 120;
 
+			if(tempdword > MAX_USER_OBJECTS)
+				return 120;
 			game.script_objects.resize(tempdword);
 
 			for(dword j = 0; j < game.script_objects.size(); j++)
@@ -1250,6 +1271,8 @@ static int32_t read_saves(ReadMode read_mode, PACKFILE* f, std::vector<save_t>& 
 			if(!p_igetl(&tempdword, f))
 				return 123;
 
+			if(tempdword > MAX_USER_STACKS)
+				return 123;
 			game.script_stacks.resize(tempdword);
 
 			for(dword j = 0; j < game.script_stacks.size(); j++)
@@ -1289,6 +1312,9 @@ static int32_t read_saves(ReadMode read_mode, PACKFILE* f, std::vector<save_t>& 
 			if(!p_igetl(&tempdword, f))
 				return 130;
 
+			// Many slots can hold the same object, so the object limits don't cap this.
+			if(tempdword > MAX_SAVED_ARRAY_SIZE)
+				return 130;
 			game.engine_object_slots.resize(tempdword);
 			for (auto& [slot, type] : game.engine_object_slots)
 			{

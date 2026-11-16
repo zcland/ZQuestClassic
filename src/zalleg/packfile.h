@@ -29,6 +29,7 @@ bool pfwrite(const void *p,int32_t n,PACKFILE *f);
 
 bool pfread(void *p,int n,PACKFILE *f,bool allow_less = false);
 bool p_getc(void *p,PACKFILE *f);
+bool p_getc(bool *p,PACKFILE *f);
 bool p_putc(int32_t c,PACKFILE *f);
 bool p_igetw(void *p,PACKFILE *f);
 bool p_iputw(int32_t c,PACKFILE *f);
@@ -247,14 +248,21 @@ inline bool p_putvar(def_pair<A,B> const& ptr, PACKFILE *f)
 
 //
 
+// Reads a bounded_vec or bounded_map.
 template<uint_type Sz,typename T>
-inline bool p_getbvec(bounded_vec<Sz,T> *cont, PACKFILE *f)
+inline bool p_getbcont(bounded_container<Sz,T> *cont, PACKFILE *f)
 {
+	// A container's bound (ex: MAXLEVELS) is how many entries the code using it expects, so the
+	// file doesn't get to change it - only a container without one (a temporary) takes its size
+	// from the file. Entries past the bound are skipped.
+	Sz bound = cont->size();
 	cont->clear();
 	Sz sz = 0;
 	if(!p_getvar(&sz,f))
 		return false;
-	cont->resize(sz);
+	if(!bound)
+		bound = sz;
+	cont->resize(bound);
 	if(sz) //cont found
 	{
 		Sz count;
@@ -263,31 +271,27 @@ inline bool p_getbvec(bounded_vec<Sz,T> *cont, PACKFILE *f)
 			return false;
 		if(!p_getvar(&count,f))
 			return false;
-		Sz k;
-		T v = cont->defval();
-		if(pairs)
+		// Each entry starts from the default: when entries are containers themselves, that is
+		// where they get their own bound from.
+		for(Sz q = 0; q < count; ++q)
 		{
-			while(count--)
-			{
-				if(!p_getvar(&k,f))
-					return false;
-				if(!p_getvar(&v,f))
-					return false;
+			Sz k = q;
+			if(pairs && !p_getvar(&k,f))
+				return false;
+			T v = cont->defval();
+			if(!p_getvar(&v,f))
+				return false;
+			if(k < bound)
 				(*cont)[k] = v;
-			}
-		}
-		else
-		{
-			for(k = 0; k < count; ++k)
-			{
-				if(!p_getvar(&v,f))
-					return false;
-				(*cont)[k] = v;
-			}
 		}
 		cont->normalize();
 	}
 	return true;
+}
+template<uint_type Sz,typename T>
+inline bool p_getbvec(bounded_vec<Sz,T> *cont, PACKFILE *f)
+{
+	return p_getbcont<Sz,T>(cont, f);
 }
 template<uint_type Sz,typename T>
 inline bool p_putbvec(bounded_vec<Sz,T> const& cont, PACKFILE *f)
@@ -332,44 +336,7 @@ inline bool p_putbvec(bounded_vec<Sz,T> const& cont, PACKFILE *f)
 template<uint_type Sz,typename T>
 inline bool p_getbmap(bounded_map<Sz,T> *cont, PACKFILE *f)
 {
-	cont->clear();
-	Sz sz = 0;
-	if(!p_getvar(&sz,f))
-		return false;
-	cont->resize(sz);
-	if(sz) //cont found
-	{
-		Sz count;
-		byte pairs;
-		if(!p_getc(&pairs,f))
-			return false;
-		if(!p_getvar(&count,f))
-			return false;
-		Sz k;
-		T v = cont->defval();
-		if(pairs)
-		{
-			while(count--)
-			{
-				if(!p_getvar(&k,f))
-					return false;
-				if(!p_getvar(&v,f))
-					return false;
-				(*cont)[k] = v;
-			}
-		}
-		else
-		{
-			for(k = 0; k < count; ++k)
-			{
-				if(!p_getvar(&v,f))
-					return false;
-				(*cont)[k] = v;
-			}
-		}
-		cont->normalize();
-	}
-	return true;
+	return p_getbcont<Sz,T>(cont, f);
 }
 template<uint_type Sz,typename T>
 inline bool p_putbmap(bounded_map<Sz,T> const& cont, PACKFILE *f)
@@ -554,7 +521,9 @@ inline bool p_getlvec(vector<T> *vec, PACKFILE *f)
 		return false;
 	if(sz) //vec found
 	{
-		vec->reserve(sz);
+		// The size comes from the file, so only so much is reserved up front: a damaged file
+		// could ask for all of memory before any of it is read.
+		vec->reserve(std::min<dword>(sz, 0x10000));
 		T dummy = T();
 		for(size_t q = 0; q < sz; ++q)
 		{
