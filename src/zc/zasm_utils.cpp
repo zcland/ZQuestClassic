@@ -72,9 +72,14 @@ void zasm_init_meta_cache()
 	}
 }
 
-const std::vector<CommandMetadata>& zasm_get_command_meta_cache()
+const CommandMetadata& zasm_get_command_meta(int command)
 {
-	return command_meta_cache;
+	// Quests can hold any command. Unknown ones stop the script when reached, and read or write
+	// nothing.
+	static const CommandMetadata unknown_command_meta{};
+	if ((unsigned)command >= command_meta_cache.size())
+		return unknown_command_meta;
+	return command_meta_cache[command];
 }
 
 const std::vector<uint8_t>& zasm_get_register_dependency_mask_cache()
@@ -89,35 +94,61 @@ bool StructuredZasm::is_modern_function_calling()
 	return calling_mode == CALLING_MODE_CALLFUNC_RETURNFUNC || calling_mode == CALLING_MODE_UNKNOWN;
 }
 
+// Finds the functions from the quest's debug data. That comes from the quest file, so it is only
+// used if it fits this script: every function within it, and every script starting at a function.
+// Returns false (with nothing found) otherwise.
+static bool find_functions_from_debug_data(const zasm_script* script, std::vector<ZasmFunction>& functions, std::map<pc_t, pc_t>& start_pc_to_function)
+{
+	if (!zasm_debug_data.exists())
+		return false;
+
+	for (const auto& scope : zasm_debug_data.scopes)
+	{
+		if (scope.tag != TAG_FUNCTION)
+			continue;
+		if (scope.start_pc == 0 && scope.end_pc == 0)
+			continue;
+		if (scope.start_pc > scope.end_pc || scope.end_pc >= script->size)
+		{
+			functions.clear();
+			return false;
+		}
+
+		functions.push_back({0, zasm_debug_data.getFullScopeName(&scope), scope.start_pc, scope.end_pc});
+	}
+
+	std::sort(functions.begin(), functions.end(), [](auto& a, auto& b){
+		return a.start_pc < b.start_pc;
+	});
+
+	for (int i = 0; i < functions.size(); i++)
+	{
+		functions[i].id = i;
+		start_pc_to_function[functions[i].start_pc] = i;
+	}
+
+	for (auto sd : script->script_datas)
+	{
+		if (!start_pc_to_function.contains(sd->pc))
+		{
+			functions.clear();
+			start_pc_to_function.clear();
+			return false;
+		}
+	}
+
+	return true;
+}
+
 StructuredZasm zasm_construct_structured(const zasm_script* script)
 {
 	std::vector<ZasmFunction> functions;
 	std::set<pc_t> function_calls;
 	std::map<pc_t, pc_t> start_pc_to_function;
 
-	if (zasm_debug_data.exists())
+	// Without usable debug data, the functions are found from the ZASM instead (below).
+	if (find_functions_from_debug_data(script, functions, start_pc_to_function))
 	{
-		for (const auto& scope : zasm_debug_data.scopes)
-		{
-			if (scope.tag == TAG_FUNCTION)
-			{
-				if (scope.start_pc == 0 && scope.end_pc == 0)
-					continue;
-
-				functions.push_back({0, zasm_debug_data.getFullScopeName(&scope), scope.start_pc, scope.end_pc});
-			}
-		}
-
-		std::sort(functions.begin(), functions.end(), [](auto& a, auto& b){
-			return a.start_pc < b.start_pc;
-		});
-
-		for (int i = 0; i < functions.size(); i++)
-		{
-			functions[i].id = i;
-			start_pc_to_function[functions[i].start_pc] = i;
-		}
-
 		// Find all function calls, and build the call graph (called_by_functions).
 		// The latter is needed by zasm_find_yielding_functions to propagate "may
 		// yield" up to transitive callers - e.g. a function that calls a function
@@ -303,19 +334,21 @@ StructuredZasm zasm_construct_structured(const zasm_script* script)
 		functions.push_back({i, "", function_start_pcs.at(i), function_final_pcs.at(i)});
 	}
 
-	for (auto [a, b] : function_calls_pc_to_pc)
+	for (auto [call_pc, target_pc] : function_calls_pc_to_pc)
 	{
-		auto it = std::lower_bound(function_start_pcs.begin(), function_start_pcs.end(), a);
-		ASSERT(it != function_start_pcs.end());
-		pc_t callee_pc = std::distance(function_start_pcs.begin(), it) - 1;
+		// The function the call is in is the last one that starts at or before it. The compiler
+		// always emits something before a call (saving the stack frame, or pushing the return
+		// address), but hand-written ZASM can start a function with one.
+		auto it = std::upper_bound(function_start_pcs.begin(), function_start_pcs.end(), call_pc);
+		pc_t caller_id = std::distance(function_start_pcs.begin(), it) - 1;
 
-		it = std::lower_bound(function_start_pcs.begin(), function_start_pcs.end(), b);
+		it = std::lower_bound(function_start_pcs.begin(), function_start_pcs.end(), target_pc);
 		ASSERT(it != function_start_pcs.end());
-		ASSERT(*it == b);
-		pc_t call_pc = std::distance(function_start_pcs.begin(), it);
+		ASSERT(*it == target_pc);
+		pc_t callee_id = std::distance(function_start_pcs.begin(), it);
 
-		functions.at(call_pc).called_by_functions.insert(callee_pc);
-		// functions[callee_pc].calls_functions.insert(call_pc);
+		functions.at(callee_id).called_by_functions.insert(caller_id);
+		// functions[caller_id].calls_functions.insert(callee_id);
 	}
 
 	for (auto sd : script->script_datas)
@@ -720,7 +753,7 @@ static bool call_reads_all(int32_t callee, const StructuredZasm& structured_zasm
 
 static void instruction_reads_writes(const ffscript& instr, bool suspend_uses_all_registers, uint8_t& reads, uint8_t& writes)
 {
-	auto& meta = command_meta_cache[instr.command];
+	auto& meta = zasm_get_command_meta(instr.command);
 
 	// An instruction's reads all happen before its writes, so collect the masks for every arg
 	// first. Interleaving them per-arg would drop the read when one arg writes a register another
@@ -735,7 +768,7 @@ static void instruction_reads_writes(const ffscript& instr, bool suspend_uses_al
 		if (!arg_info.is_reg) continue;
 
 		int reg = p_arg[argn];
-		if (reg < 8)
+		if ((unsigned)reg < 8)
 		{
 			if (arg_info.reads)
 				reads |= (1 << reg);
@@ -743,7 +776,8 @@ static void instruction_reads_writes(const ffscript& instr, bool suspend_uses_al
 				writes |= (1 << reg);
 		}
 
-		reads |= register_dependency_mask_cache[reg];
+		if ((unsigned)reg < register_dependency_mask_cache.size())
+			reads |= register_dependency_mask_cache[reg];
 	}
 
 	if (suspend_uses_all_registers && instruction_is_suspend(instr))

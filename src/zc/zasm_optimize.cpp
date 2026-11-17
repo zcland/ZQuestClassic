@@ -119,8 +119,7 @@ static void for_every_side_effect_d_registers_only(const ffscript& instr, T fn)
 {
 	std::array<bool, 8> r{}, w{};
 
-	auto& command_meta_cache = zasm_get_command_meta_cache();
-	auto& meta = command_meta_cache[instr.command];
+	auto& meta = zasm_get_command_meta(instr.command);
 	for (int i = 0; i < 8; i++)
 	{
 		r[i] = meta.implicit_read_mask & (1 << i);
@@ -134,7 +133,7 @@ static void for_every_side_effect_d_registers_only(const ffscript& instr, T fn)
 		if (!arg_info.is_reg) continue;
 
 		int reg = p_arg[argn];
-		if (reg < 8)
+		if ((unsigned)reg < 8)
 		{
 			if (arg_info.reads)
 				r[reg] = true;
@@ -241,6 +240,9 @@ template <typename T>
 static void for_every_register_side_effect_args_only(const ffscript& instr, T fn)
 {
 	auto sc = get_script_command(instr.command);
+	// Quests can hold any command. Unknown ones stop the script, and read or write nothing.
+	if (!sc)
+		return;
 
 	if (sc->is_register(0))
 	{
@@ -265,6 +267,8 @@ template <typename T>
 static void for_every_side_effect_all_args(ffscript& instr, T fn)
 {
 	auto sc = get_script_command(instr.command);
+	if (!sc)
+		return;
 
 	if (sc->args >= 1)
 	{
@@ -590,15 +594,12 @@ static bool optimize_load_store(OptContext& ctx)
 			setr_pc -= 1;
 		}
 
-		ASSERT(!bail);
+		// Not what the compiler emits, but quests can hold any ZASM.
 		if (bail)
 			continue;
 
 		if (C(setr_pc + 1).command != ADDV)
-		{
-			ASSERT(false);
 			continue;
-		}
 
 		int addv_arg2 = C(setr_pc + 1).arg2;
 		word new_command = command == LOADI ? LOADD : STORED;
@@ -619,6 +620,8 @@ static bool optimize_load_store(OptContext& ctx)
 		}
 
 		if (!one_of(command, LOADD, STORED, STOREDV)) continue;
+		// The compiler only emits whole offsets. Hand-written ZASM keeps its command.
+		if (arg2 % 10000 != 0) continue;
 
 		word new_command;
 		switch (command)
@@ -627,7 +630,6 @@ static bool optimize_load_store(OptContext& ctx)
 			case STORED: new_command = STORE; break;
 			case STOREDV: new_command = STOREV; break;
 		}
-		ASSERT(arg2 % 10000 == 0);
 		C(i) = {new_command, arg1, arg2 / 10000};
 	}
 
@@ -1802,6 +1804,9 @@ static bool optimize_reduce_comparisons(OptContext& ctx)
 			// If the comparison operands are compared again after the branch, then reducing the comparison
 			// would break the code.
 			pc_t target_pc = C(final_pc).arg1;
+			// Only hand-written ZASM jumps into another function.
+			if (!ctx.cfg.contains_block_start(target_pc))
+				break;
 			{
 				bool target_block_reuses_comparison_operands = false;
 				pc_t target_block_id = ctx.cfg.block_id_from_start_pc(target_pc);

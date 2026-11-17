@@ -5898,7 +5898,19 @@ void bmp_do_regenr(BITMAP*, int32_t *sdci, [[maybe_unused]] int32_t xoffset, [[m
 	auto& usr_bmp = scb.get(bitid);
 	if ( usr_bmp.u_bmp )
 		destroy_bitmap(usr_bmp.u_bmp);
-	usr_bmp.u_bmp = create_bitmap_ex(8,w,h);
+	usr_bmp.u_bmp = nullptr;
+	usr_bmp.width = 0;
+	usr_bmp.height = 0;
+	if (!is_valid_bitmap_size(w, h))
+	{
+		Z_scripterrlog("bitmap->Create() was given an invalid size: %d x %d.\n", w, h);
+		return;
+	}
+
+	usr_bmp.u_bmp = create_script_bitmap(w, h);
+	// Null if it was too big to allocate, the same as a freed bitmap (see checkBitmap).
+	if (!usr_bmp.u_bmp)
+		return;
 	clear_bitmap(usr_bmp.u_bmp);
 	
 	usr_bmp.width = w;
@@ -5937,26 +5949,24 @@ void bmp_do_readr(BITMAP*, int32_t i, int32_t *sdci, [[maybe_unused]] int32_t xo
     
     PALETTE tempPal;
     get_palette(tempPal);
-    if ( util::checkPath(str->c_str(), false) )
+    if (!util::checkPath(str->c_str(), false))
     {
-	    usr_bitmap.u_bmp = load_bitmap(str->c_str(), tempPal);
-	    usr_bitmap.width = usr_bitmap.u_bmp->w;
-	    usr_bitmap.height = usr_bitmap.u_bmp->h;
-	    if ( !usr_bitmap.u_bmp )
-	    {
-		Z_scripterrlog("Failed to load image file %s.\nMaking a blank bitmap on the pointer.\n", str->c_str());
-	    }
-	    else 
-	    {
-		    zprint("Read image file %s\n",str->c_str());
-	    }
+	    Z_scripterrlog("Failed to load image file: %s. File not found. Creating a blank bitmap on the pointer.\n", str->c_str());
+    }
+    else if (!(usr_bitmap.u_bmp = load_bitmap(str->c_str(), tempPal)))
+    {
+	    Z_scripterrlog("Failed to load image file %s.\nMaking a blank bitmap on the pointer.\n", str->c_str());
     }
     else
     {
-	    Z_scripterrlog("Failed to load image file: %s. File not found. Creating a blank bitmap on the pointer.\n", str->c_str());
-	    usr_bitmap.u_bmp = create_bitmap_ex(8,256,176);
-	    clear_bitmap(usr_bitmap.u_bmp);
+	    usr_bitmap.width = usr_bitmap.u_bmp->w;
+	    usr_bitmap.height = usr_bitmap.u_bmp->h;
+	    zprint("Read image file %s\n",str->c_str());
+	    return;
     }
+
+    usr_bitmap.u_bmp = create_bitmap_ex(8,256,176);
+    clear_bitmap(usr_bitmap.u_bmp);
 }
 
 

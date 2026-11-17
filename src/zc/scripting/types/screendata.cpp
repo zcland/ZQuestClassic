@@ -55,7 +55,10 @@ int32_t screendata_get_register(int32_t reg)
 	#define GET_SCREENDATA_BYTE_INDEX(member, indexbound) \
 	{ \
 		int32_t indx = GET_D(rINDEX) / 10000; \
-		ret = (scr->member[indx] *10000); \
+		if (BC::checkIndex(indx, 0, indexbound) != SH::_NoError) \
+			ret = -10000; \
+		else \
+			ret = (scr->member[indx] *10000); \
 	} \
 
 	//byte
@@ -374,24 +377,8 @@ void screendata_set_register(int32_t reg, int32_t value)
 	#define SET_SCREENDATA_BYTE_INDEX(member, str, indexbound) \
 	{ \
 		int32_t indx = GET_D(rINDEX) / 10000; \
-		scr->member[indx] = vbound((value / 10000),0,255); \
-	}
-
-	///max screen id is higher! vbound properly... -Z
-	#define SET_SCREENDATA_LAYERSCREEN_INDEX(member, str, indexbound) \
-	{ \
-		int32_t indx = GET_D(rINDEX) / 10000; \
-		int32_t scrn_id = value/10000; \
-		if ( quest_format[vFFScript] < 11 ) ++indx; \
-		if (BC::checkIndex(indx, 1, indexbound) != SH::_NoError) \
-		{ \
-		} \
-		else if ( scrn_id > MAPSCRS ) \
-		{ \
-			Z_scripterrlog("Script attempted to use a mapdata->LayerScreen[%d].\n",scrn_id); \
-			Z_scripterrlog("Valid Screen values are (0) through (%d).\n",MAPSCRS); \
-		} \
-		else scr->member[indx-1] = vbound((scrn_id),0,MAPSCRS); \
+		if (BC::checkIndex(indx, 0, indexbound) == SH::_NoError) \
+			scr->member[indx] = vbound((value / 10000),0,255); \
 	}
 
 	#define SET_SCREENDATA_FLAG(member, str) \
@@ -969,9 +956,6 @@ static ArrayRegistrar SCREENDATALAYERMAP_registrar(SCREENDATALAYERMAP, []{
 		[](int ref, int index, int value){
 			if (auto scr = checkScreen(ref))
 			{
-				if (quest_format[vFFScript] < 11)
-					index++;
-
 				scr->layermap[index - 1] = value;
 				mark_current_region_handles_dirty();
 				return true;
@@ -980,6 +964,7 @@ static ArrayRegistrar SCREENDATALAYERMAP_registrar(SCREENDATALAYERMAP, []{
 			return false;
 		}
 	);
+	impl.compatZeroIndexedSetter();
 	impl.compatSetDefaultValue(-10000);
 	impl.setMul10000(true);
 	impl.setValueTransform(transforms::vboundByte);
@@ -1002,9 +987,6 @@ static ArrayRegistrar SCREENDATALAYERSCREEN_registrar(SCREENDATALAYERSCREEN, []{
 		[](int ref, int index, int value){
 			if (auto scr = checkScreen(ref))
 			{
-				if (quest_format[vFFScript] < 11)
-					index++;
-
 				scr->layerscreen[index - 1] = value;
 				mark_current_region_handles_dirty();
 				return true;
@@ -1013,6 +995,7 @@ static ArrayRegistrar SCREENDATALAYERSCREEN_registrar(SCREENDATALAYERSCREEN, []{
 			return false;
 		}
 	);
+	impl.compatZeroIndexedSetter();
 	impl.compatSetDefaultValue(-10000);
 	impl.setMul10000(true);
 	impl.setValueTransform(transforms::validate<MAPSCRS>);
@@ -1035,9 +1018,6 @@ static ArrayRegistrar SCREENDATALAYEROPACITY_registrar(SCREENDATALAYEROPACITY, [
 		[](int ref, int index, int value){
 			if (auto scr = checkScreen(ref))
 			{
-				if (quest_format[vFFScript] < 11)
-					index++;
-
 				scr->layeropacity[index - 1] = value;
 				return true;
 			}
@@ -1045,6 +1025,7 @@ static ArrayRegistrar SCREENDATALAYEROPACITY_registrar(SCREENDATALAYEROPACITY, [
 			return false;
 		}
 	);
+	impl.compatZeroIndexedSetter();
 	impl.compatSetDefaultValue(-10000);
 	impl.setMul10000(true);
 	impl.setValueTransform(transforms::vboundByte);

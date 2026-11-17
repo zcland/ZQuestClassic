@@ -23005,6 +23005,22 @@ void HeroClass::checktouchblk()
 	}
 }
 
+// Converts a position on the screen next to the hero's screen, toward `dir`, to coordinates within
+// that screen. The coordinate along `dir` is already one on that screen. The other is a world
+// coordinate, so it is made relative to the hero's screen (the one nextscr2 starts from) - the
+// hero may straddle two screens of a region, or be off the screen entirely if a script put them
+// there, so it is also kept on the screen.
+static std::pair<int32_t, int32_t> next_screen_xy(int32_t x, int32_t y, int32_t dir)
+{
+	int screen = screenscrolling ? scrolling_hero_screen : Hero.current_screen;
+	auto [sx, sy] = translate_screen_coordinates_to_world(screen);
+	if (dir == up || dir == down)
+		x -= sx;
+	else
+		y -= sy;
+	return {std::clamp(x, 0, 255), std::clamp(y, 0, 175)};
+}
+
 int32_t HeroClass::nextcombo(int32_t cx, int32_t cy, int32_t cdir)
 {
     switch(cdir)
@@ -23052,7 +23068,8 @@ int32_t HeroClass::nextcombo(int32_t cx, int32_t cy, int32_t cdir)
             break;
         }
 		
-		int32_t cmb = COMBOPOS(cx%256, cy%176);
+		auto [lx, ly] = next_screen_xy(cx, cy, cdir);
+		int32_t cmb = COMBOPOS(lx, ly);
 		return get_canonical_scr(map, screen)->data[cmb];
     }
     
@@ -23106,7 +23123,8 @@ int32_t HeroClass::nextflag(int32_t cx, int32_t cy, int32_t cdir, bool comboflag
             break;
         }
 		
-        int32_t pos = COMBOPOS(cx%256, cy%176);
+        auto [lx, ly] = next_screen_xy(cx, cy, cdir);
+        int32_t pos = COMBOPOS(lx, ly);
         const mapscr* scr = get_canonical_scr(map, screen);
         if (!comboflag)
         {
@@ -26656,7 +26674,8 @@ bool HeroClass::nextcombo_wf(int32_t d2)
     // check lower half of combo
     cy += 8;
     
-    int32_t cmb = COMBOPOS(cx%256, cy%176);    
+    std::tie(cx, cy) = next_screen_xy(cx, cy, d2);
+    int32_t cmb = COMBOPOS(cx, cy);
     const newcombo* c = &combobuf[scr->data[cmb]];
     bool dried = iswater_type(c->type) && DRIEDLAKE;
     bool swim = iswater_type(c->type) && (current_item(itype_flippers)) && !dried;
@@ -26676,6 +26695,10 @@ bool HeroClass::nextcombo_wf(int32_t d2)
     }
     else
     {
+        // There is no combo after the last one.
+        if (cmb == 175)
+            return false;
+
         c = &combobuf[scr->data[++cmb]];
         dried = iswater_type(c->type) && DRIEDLAKE;
         swim = iswater_type(c->type) && (current_item(itype_flippers)) && !dried;
@@ -29868,7 +29891,7 @@ void dospecialmoney(mapscr* scr, int32_t index)
 		 game->change_drupy(0);   
 	    }
         }
-        msgstr::do_new(scr, QMisc.info[scr->catchall].str[priceindex]);
+        msgstr::do_new(scr, QMisc.get_info(scr->catchall).str[priceindex]);
         clear_bitmap(pricesdisplaybuf);
         set_clip_state(pricesdisplaybuf, 1);
         items.del(0);
@@ -30612,7 +30635,7 @@ bool HeroClass::checkitems(int32_t index)
 				((item*)items.spr(i))->pickup=ipDUMMY+ipFADE;
 		}
 		
-		int32_t slot = game->fillBottle(QMisc.bottle_shop_types[item_scr->catchall].fill[PriceIndex]);
+		int32_t slot = game->fillBottle(QMisc.get_bottle_shop(item_scr->catchall).fill[PriceIndex]);
 		id2 = find_bottle_for_slot(slot);
 		itm = &get_item_data(id2);
 		ptr->id = id2;
@@ -30856,10 +30879,10 @@ bool HeroClass::checkitems(int32_t index)
 				switch(item_scr->room)
 				{
 					case rSHOP:
-						shop_pstr = QMisc.shop[item_scr->catchall].str[PriceIndex];
+						shop_pstr = QMisc.get_shop(item_scr->catchall).str[PriceIndex];
 						break;
 					case rBOTTLESHOP:
-						shop_pstr = QMisc.bottle_shop_types[item_scr->catchall].str[PriceIndex];
+						shop_pstr = QMisc.get_bottle_shop(item_scr->catchall).str[PriceIndex];
 						break;
 				}
 			}
@@ -30966,7 +30989,9 @@ bool HeroClass::checkitems(int32_t index)
 		//general item pickup message
 		//show the info string
 		//non-held
-		int32_t shop_pstr = ( item_scr->room == rSHOP && PriceIndex>=0 && QMisc.shop[item_scr->catchall].str[PriceIndex] > 0 ) ? QMisc.shop[item_scr->catchall].str[PriceIndex] : 0;
+		int32_t shop_pstr = 0;
+		if (item_scr->room == rSHOP && PriceIndex >= 0)
+			shop_pstr = std::max<int32_t>(0, QMisc.get_shop(item_scr->catchall).str[PriceIndex]);
 		if ( (pstr > 0 && pstr < msg_count) || (shop_pstr > 0 && shop_pstr < msg_count) )
 		{
 			if ( (pstr > 0 && pstr < msg_count) && ( (!(pstr_flags&itemdataPSTRING_IP_HOLDUP)) && ( pstr_flags&itemdataPSTRING_NOMARK || pstr_flags&itemdataPSTRING_ALWAYS || (!(FFCore.GetItemMessagePlayed(id2))) ) ) )
@@ -32794,6 +32819,10 @@ void HeroClass::explode(int32_t type)
 	static byte herotilebuf[256];
 	int32_t ltile=0;
 	int32_t lflip=0;
+	// Scripts can set any tile. Like drawing it, exploding one that doesn't exist does nothing.
+	if ((unsigned)tile >= NEWMAXTILES)
+		return;
+
 	unpack_tile(newtilebuf, tile, flip, true);
 	memcpy(herotilebuf, unpackbuf, 256);
 	for(int32_t i=0; i<16; ++i)

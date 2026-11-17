@@ -270,6 +270,9 @@ sprite::~sprite()
 		util::remove_if_exists(parent->children, this);
 	for (auto child : children)
 		child->parent = nullptr;
+	// The hero may be in the middle of swapping places with this sprite.
+	if (switching_object == this)
+		switching_object = nullptr;
 	#endif
 }
 
@@ -2715,6 +2718,10 @@ void sprite_list::forEach(std::function<bool(sprite&)> proc)
 void sprite::explode(int32_t type)
 {
 	byte spritetilebuf[256];
+	// Scripts can set any tile. Like drawing it, exploding one that doesn't exist does nothing.
+	if ((unsigned)tile >= NEWMAXTILES)
+		return;
+
 	unpack_tile(newtilebuf, tile, flip, true);
 	memcpy(spritetilebuf, unpackbuf, 256);	
 	
