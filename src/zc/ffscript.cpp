@@ -3215,8 +3215,14 @@ void stack_push(int32_t val)
 }
 void stack_push(int32_t val, size_t count)
 {
-	if (!check_stack(ri->sp - count))
+	// The pushes fill the slots from sp - count to sp - 1. So count can't be more than sp, and sp
+	// can't be past MAX_STACK_SIZE, the empty stack (SETR can set SP to anything).
+	if (count > ri->sp || ri->sp > MAX_STACK_SIZE)
+	{
+		log_stack_overflow_error();
+		ri->overflow = true;
 		return;
+	}
 
 	for(int q = 0; q < count; ++q)
 	{
@@ -3407,6 +3413,7 @@ void do_pops() // Pop past a bunch of stuff at once. Useful for clearing the sta
 
 void do_pushs(const bool v) // Push a bunch of the same thing. Useful for filling the stack.
 {
+	if(sarg2 < 1) return;
 	const int value = SH::get_arg(sarg1, v);
 	stack_push(value, sarg2);
 }
@@ -7260,6 +7267,18 @@ void FFScript::do_loadbitmapid(const bool v)
 	}
 }
 
+// The screen a sprite a script creates is spawned on. Scripts can set the screen ref to anything,
+// but consumers of screen_spawned need it to be a loaded screen (see SPRITE_SPAWN_SCREEN).
+static int script_spawn_screen()
+{
+	int screen = ri->screenref();
+	if (is_in_current_region(screen))
+		return screen;
+
+	scripting_log_error_with_context("Invalid screen {}: screen is not in the current region", screen);
+	return cur_screen;
+}
+
 void do_createlweapon(const bool v)
 {
 	const int32_t ID = SH::get_arg(sarg1, v) / 10000;
@@ -7290,7 +7309,7 @@ void do_createlweapon(const bool v)
 		);
 		weapon *w = (weapon*)Lwpns.spr(Lwpns.Count()-1); //last created
 		ri->lwpnref() = w->getUID();
-		w->screen_spawned = ri->screenref();
+		w->screen_spawned = script_spawn_screen();
 		w->ScriptGenerated = 1;
 		w->isLWeapon = 1;
 		if(ID == wWind) w->specialinfo = 1;
@@ -7319,7 +7338,7 @@ void do_createeweapon(const bool v)
 		if( ID > wEnemyWeapons || ( ID >= wScript1 && ID <= wScript10) )
 		{
 			weapon *w = (weapon*)Ewpns.spr(Ewpns.Count()-1); //last created
-			w->screen_spawned = ri->screenref();
+			w->screen_spawned = script_spawn_screen();
 			w->ScriptGenerated = 1;
 			w->isLWeapon = 0;
 			ri->ewpnref() = w->getUID();
@@ -7349,7 +7368,7 @@ void do_createitem(const bool v)
 	{
 		additem(0, (get_qr(qr_NOITEMOFFSET) ? 1: 0), ID, ipBIGRANGE);
 		sprite* item = items.spr(items.Count() - 1);
-		item->screen_spawned = ri->screenref();
+		item->screen_spawned = script_spawn_screen();
 		ri->itemref() = item->getUID();
 		Z_eventlog("Script created item \"%s\" with UID = %u\n", itemsbuf.get(ID).name.c_str(), ri->itemref());
 	}
@@ -7368,7 +7387,8 @@ void do_createnpc(const bool v)
 		return;
 		
 	//If we make a segmented enemy there'll be more than one sprite created
-	word numcreated = addenemy(ri->screenref(), 0, 0, ID, -10);
+	int spawn_screen = script_spawn_screen();
+	word numcreated = addenemy(spawn_screen, 0, 0, ID, -10);
 	
 	if(numcreated == 0)
 	{
@@ -7384,7 +7404,7 @@ void do_createnpc(const bool v)
 		{
 			enemy* e = ((enemy*)guys.spr(index));
 			e->script_spawned = true;
-			e->screen_spawned = ri->screenref();
+			e->screen_spawned = spawn_screen;
 		}
 			
 		Z_eventlog("Script created NPC \"%s\" with UID = %u\n", guy_string[ID], ri->npcref());
@@ -7786,7 +7806,7 @@ static void do_drawing_command(int32_t script_command, bool is_screen_draw)
 				return;
 			}
 			std::vector<int32_t> *v = script_drawing_commands.GetVector();
-			v->resize(sz, 0);
+			v->resize(26, 0);
 			
 			int32_t* pos = &v->at(0);
 			int32_t* uv = &v->at(12);
@@ -7821,7 +7841,7 @@ static void do_drawing_command(int32_t script_command, bool is_screen_draw)
 			}
 			
 			std::vector<int32_t> *v = script_drawing_commands.GetVector();
-			v->resize(sz, 0);
+			v->resize(20, 0);
 			
 			int32_t* pos = &v->at(0);
 			int32_t* uv = &v->at(9);
@@ -10412,7 +10432,16 @@ int32_t run_script_int(JittedScriptInstance* j_instance)
 					scommand = 0xFFFF;
 					break;
 				}
-				ri->pc = (get_register(sarg1) / 10000) - 1;
+				// The compiler only jumps back to a pc it saved, but hand-written ZASM can jump
+				// anywhere, and the next command would be read from there.
+				int32_t target = (get_register(sarg1) / 10000) - 1;
+				if (target < 0 || (size_t)target >= zasm.size())
+				{
+					Z_scripterrlog("GOTOR attempted to jump to an invalid pc (%d).\n", target);
+					scommand = 0xFFFF;
+					break;
+				}
+				ri->pc = target;
 				increment = false;
 			}
 			break;
@@ -10644,7 +10673,15 @@ int32_t run_script_int(JittedScriptInstance* j_instance)
 					ri->pc = MAX_PC;
 					break; //handled below. 'RETURNFUNC' does this better now.
 				}
-				ri->pc = SH::read_stack(ri->sp) - 1;
+				// As with GOTOR, the return pc must be in the script.
+				int32_t target = SH::read_stack(ri->sp) - 1;
+				if (target < 0 || (size_t)target >= zasm.size())
+				{
+					Z_scripterrlog("RETURN attempted to jump to an invalid pc (%d).\n", target);
+					scommand = 0xFFFF;
+					break;
+				}
+				ri->pc = target;
 				++ri->sp;
 				increment = false;
 				break;
@@ -12901,7 +12938,16 @@ int32_t run_script_int(JittedScriptInstance* j_instance)
 				auto lwuid = SH::read_stack(ri->sp + 2);
 				auto lifttime = SH::read_stack(ri->sp + 1)/10000;
 				auto liftheight = zslongToFix(SH::read_stack(ri->sp + 0));
-				if(weapon* wpn = checkLWpn(lwuid))
+				weapon* wpn = checkLWpn(lwuid);
+				// Only an lweapon can be lifted: the hero holds it outside of every sprite list, and
+				// puts it in Lwpns when released. Any other weapon would stay in its own list too,
+				// and be freed from one list while still in the other.
+				if(wpn && wpn != Hero.lift_wpn && Lwpns.find(wpn) == -1)
+				{
+					scripting_log_error_with_context("Only an lweapon can be lifted");
+					wpn = nullptr;
+				}
+				if(wpn)
 				{
 					Hero.lift(wpn, lifttime, liftheight);
 					if(Lwpns.find(wpn) > -1)
@@ -14036,9 +14082,11 @@ int32_t run_script_int(JittedScriptInstance* j_instance)
 		{
 			if(earlyretval == RUNSCRIPT_SELFDELETE)
 			{
-				// The JIT uses instruction_could_return_not_ok to decide whether to check a command's
-				// return code. A self-deleting command that isn't registered there is silently
-				// ignored by the JIT (it diverges from the interpreter), so catch that here.
+				// The JIT runs a command in the interpreter, rather than as its own compiled code,
+				// only if instruction_could_return_not_ok says it can stop the script (see
+				// jit_instruction_runs_in_interpreter). A self-deleting command that isn't registered
+				// there would not stop a jitted script (it diverges from the interpreter), so catch
+				// that here.
 				CHECK(instruction_could_return_not_ok(ffscript(scommand, sarg1, sarg2, sarg3)));
 				earlyretval = -1;
 				return RUNSCRIPT_SELFDELETE;
@@ -14094,6 +14142,12 @@ int32_t run_script_int(JittedScriptInstance* j_instance)
 			break;
 		}
 	}
+	// The debugger evaluates a function call by running it here, as a run nested within (or on
+	// behalf of) a script. Whatever ended that run must not end the script too, which is what the
+	// rest of this function goes on to do. Only a quit is reported as one.
+	if (script_is_within_debugger_vm)
+		return hit_invalid_zasm ? RUNSCRIPT_ERROR : RUNSCRIPT_STOPPED;
+
 	if(script_funcrun) return RUNSCRIPT_OK;
 	
 	if(!scriptCanSave)

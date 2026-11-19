@@ -917,6 +917,9 @@ int32_t read_weap_data(weapon_data& data, PACKFILE* f)
 		}
 		else if (!p_igetw(&(data.burnsprs[q]), f))
 			return qe_invalid;
+		// Only a damaged quest has a sprite past the last one.
+		if (data.burnsprs[q] >= MAXSPRITES)
+			data.burnsprs[q] = 0;
 		if (!p_getc(&(data.light_rads[q]), f))
 			return qe_invalid;
 		if (v_weapon_data >= 3)
@@ -2786,6 +2789,18 @@ static int32_t _lq_int(const char *filename, zquestheader *Header, miscQdata *Mi
 		map_count = 1;
 		map_infos.clear();
 		map_infos.resize(1);
+	}
+
+	if (!get_bit(skip_flags, skip_maps) && !get_bit(skip_flags, skip_dmaps))
+	{
+		// A dmap's screens are looked up in its map without checking it, and only a damaged quest
+		// has a dmap on a map past the last one (the editor moves them when the map count drops).
+		// Dmaps are read before maps, so this waits until both are.
+		for (int i = 0; i < MAXDMAPS; i++)
+		{
+			if (DMaps[i].map >= map_count)
+				DMaps[i].map = 0;
+		}
 	}
 
 	if(loading_tileset_flags & TILESET_CLEARHEADER)

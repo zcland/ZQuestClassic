@@ -870,7 +870,20 @@ void mapdata_set_register(int32_t reg, int32_t value)
 		case MAPDATASTAIRY: 		SET_MAPDATA_VAR_BYTE(stairy); break;	//b
 		case MAPDATASTRING:		SET_MAPDATA_VAR_INT32(str); break;		//w
 		case MAPDATATIMEDWARPTICS: 	SET_MAPDATA_VAR_INT32(timedwarptics); break;	//W
-		case MAPDATAUNDERCOMBO: 	SET_MAPDATA_VAR_INT32(undercombo); break;	//w
+		case MAPDATAUNDERCOMBO:
+		{
+			if (mapscr *m = ResolveMapdataScr(GET_REF(mapdataref)))
+			{
+				int cid = value/10000;
+				if (unsigned(cid) >= MAXCOMBOS)
+				{
+					scripting_log_error_with_context("Invalid combo: {}", cid);
+					break;
+				}
+				m->undercombo = cid;
+			}
+			break;
+		}
 		case MAPDATAUNDERCSET:	 	SET_MAPDATA_VAR_BYTE(undercset); break; //b
 		case MAPDATAVALID:		SET_MAPDATA_VAR_BYTE(valid); break;		//b
 		case MAPDATAVIEWX: 		break;//SET_MAPDATA_VAR_INT32(viewX, "ViewX"); break;	//W
@@ -1164,14 +1177,14 @@ static ArrayRegistrar MAPDATASIDEWARPSC_registrar(MAPDATASIDEWARPSC, []{
 static ArrayRegistrar MAPDATASIDEWARPDMAP_registrar(MAPDATASIDEWARPDMAP, []{
 	static ScriptingArray_ObjectMemberCArray<mapscr, &mapscr::sidewarpdmap> impl;
 	impl.setMul10000(true);
-	impl.setValueTransform(transforms::vboundInt);
+	impl.setValueTransform(transforms::validate<MAXDMAPS>);
 	return &impl;
 }());
 
 static ArrayRegistrar MAPDATASECRETCOMBO_registrar(MAPDATASECRETCOMBO, []{
 	static ScriptingArray_ObjectMemberCArray<mapscr, &mapscr::secretcombo> impl;
 	impl.setMul10000(true);
-	impl.setValueTransform(transforms::vboundInt);
+	impl.setValueTransform(transforms::validate<MAXCOMBOS>);
 	return &impl;
 }());
 
@@ -1227,7 +1240,7 @@ static ArrayRegistrar MAPDATAWARPRETY_registrar(MAPDATAWARPRETY, []{
 static ArrayRegistrar MAPDATATILEWARPDMAP_registrar(MAPDATATILEWARPDMAP, []{
 	static ScriptingArray_ObjectMemberCArray<mapscr, &mapscr::tilewarpdmap> impl;
 	impl.setMul10000(true);
-	impl.setValueTransform(transforms::vboundInt);
+	impl.setValueTransform(transforms::validate<MAXDMAPS>);
 	return &impl;
 }());
 
@@ -1572,6 +1585,13 @@ static ArrayRegistrar MAPDATALAYERMAP_registrar(MAPDATALAYERMAP, []{
 		[](int ref, int index, int value){
 			if (auto mapdata = checkMapData(ref))
 			{
+				// Loading the screen reads the layer from this map.
+				if (value > map_count)
+				{
+					scripting_log_error_with_context("Invalid map: {} - there are {} maps", value, map_count);
+					return false;
+				}
+
 				mapdata->scr->layermap[index - 1] = value;
 				if (mapdata->current())
 					mark_current_region_handles_dirty();
@@ -1776,6 +1796,7 @@ static ArrayRegistrar MAPDATAFFDATA_registrar(MAPDATAFFDATA, []{
 	impl.compatSetDefaultValue(-10000);
 	impl.setMul10000(true);
 	impl.skipIndexCheck();
+	impl.setValueTransform(transforms::validate<MAXCOMBOS>);
 	return &impl;
 }());
 

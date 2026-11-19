@@ -530,6 +530,9 @@ static TestTask run_scopes_replay_coroutine()
 
 	// Pause within first call to `new A::CL()`
 	debugger->RemoveBreakpoints();
+	// On the way there Test::AssertEqual is called many times, with a different `expected` each
+	// time. Each call has its own, so none of that is a change to it and this never pauses.
+	debugger->AddValueChangeBreakpoint("expected");
 	add_breakpoint(debugger, "scopes.zs", "d->dosomething()");
 	co_await PlayAndWaitForPause(debugger);
 
@@ -659,6 +662,9 @@ static TestTask run_scopes_replay_coroutine()
 	verify_expression(debugger, "arr6[0]->arr[1]", "1.0000");
 	verify_expression(debugger, "arr6[0]->arr_untyped", "{0, 10000, CL {A_var = 11.0000, arr = {0.0000, 1.0000, 2.0000}, arr_untyped = ..., this_ptr = ...}}");
 	verify_expression(debugger, "arr6[0]->arr_untyped[1]", "10000");
+	// Untyped values are fixed-point, same as an int.
+	verify_expression(debugger, "arr6[0]->arr_untyped[1] * arr6[0]->arr_untyped[1]", "1.0000");
+	verify_expression(debugger, "~arr6[0]->arr_untyped[1]", "-20000");
 	verify_expression(debugger, "arr6[0]->arr_untyped[2]", "CL {A_var = 11.0000, arr = {0.0000, 1.0000, 2.0000}, arr_untyped = {0, 10000, ...}, this_ptr = ...}");
 
 	verify_expression(debugger, "arr1[1] = 100", "100.0000");
@@ -702,6 +708,15 @@ static TestTask run_scopes_replay_coroutine()
 	verify_expression(debugger, "RefCount(arr5[0])", "5L");
 	verify_expression(debugger, "arr6[1] = 123", "123.0000");
 	verify_expression(debugger, "RefCount(arr5[0])", "4L");
+
+	// Only a value that contains itself is cut short with "...". The same array appearing twice
+	// is printed twice.
+	verify_expression(debugger, "arr6[0] = arr1", "{101.0000, 101.0000}");
+	verify_expression(debugger, "arr6[1] = arr1", "{101.0000, 101.0000}");
+	verify_expression(debugger, "arr6", "{{1010000, 1010000}, {1010000, 1010000}, {10000, 20000}, bitmap {Height = 32.0000, Width = 32.0000}}");
+	verify_expression(debugger, "arr6[0] = NULL", "0");
+	verify_expression(debugger, "arr6[1] = 123", "123.0000");
+	verify_expression(debugger, "RefCount(arr1)", "1L");
 
 	// A script error raised while evaluating must not pause the debugger, even when breaking on
 	// errors: that paused on the evaluation's temporary state, and the pause's own variable reads
@@ -758,6 +773,12 @@ static TestTask run_scopes_replay_coroutine()
 		DebugValue val{170000, blitflags_type};
 		assertEqual(debugger->ValueToStringSummary(val), "(BlitModeBitflags) BITDX_TRANS | 0x10"s);
 	}
+	// `~` works on the integer part of a bitflags value, like for any int - so it can clear a flag.
+	verify_expression(debugger, "(BITDX_TRANS | BITDX_PIVOT) & ~BITDX_PIVOT", "(BlitModeBitflags) BITDX_TRANS");
+	verify_expression(debugger, "~~BITDX_TRANS", "(BlitModeBitflags) BITDX_TRANS");
+	// Enums are fixed-point values, same as an int.
+	verify_expression(debugger, "Enum_B + Enum_B", "2.0000");
+	verify_expression(debugger, "Enum_B * Enum_B", "1.0000");
 	verify_expression(debugger, "NUM_COMBO_POS", "176.0000");
 	verify_expression(debugger, "OP_OPAQUE", "128.0000");
 
@@ -777,6 +798,24 @@ static TestTask run_scopes_replay_coroutine()
 	verify_expression(debugger, "n->X", "10.0000");
 	verify_expression(debugger, "b", "bitmap {Height = 32.0000, Width = 32.0000}");
 	verify_expression(debugger, "b->Width", "32.0000");
+
+	// Members declared const (like most of the engine's arrays) expand like any other.
+	{
+		debugger->RemoveWatches();
+		debugger->AddWatchExpression("Screen");
+		debugger->UpdateVariables();
+		assertSize(debugger->watch_variables, 1);
+		Variable& screen_var = debugger->watch_variables[0];
+		debugger->FetchChildren(screen_var);
+		auto it = std::ranges::find_if(screen_var.children, [](auto& child){ return child.name == "ComboData"; });
+		assertTrue(it != screen_var.children.end());
+		assertTrue(zasm_debug_data.getType(it->symbol->type_id)->tag == TYPE_CONST);
+		assertTrue(it->is_expandable);
+		debugger->FetchChildren(*it);
+		assertSize(it->children, 176);
+		assertEqual(it->children[0].name, "[0]"s);
+		debugger->RemoveWatches();
+	}
 
 	// Engine objects in untyped arrays must resolve to their proper debug type.
 	verify_expression(debugger, "arr_rng[0]", "randgen {}");
@@ -812,6 +851,22 @@ static TestTask run_scopes_replay_coroutine()
 		assertTrue(debugger->root_node.children.empty());
 	}
 
+	// A function call must leave the interrupted instruction's operands as they were.
+	{
+		extern int32_t sarg1, sarg2, sarg3;
+		int32_t prev_sarg1 = sarg1, prev_sarg2 = sarg2, prev_sarg3 = sarg3;
+		sarg1 = 1111;
+		sarg2 = 2222;
+		sarg3 = 3333;
+		assertTrue(debugger->Evaluate("DebugFunctionVarargs(1, 2, 3)", true).has_value());
+		assertEqual(sarg1, 1111);
+		assertEqual(sarg2, 2222);
+		assertEqual(sarg3, 3333);
+		sarg1 = prev_sarg1;
+		sarg2 = prev_sarg2;
+		sarg3 = prev_sarg3;
+	}
+
 	// 'new' expression.
 	verify_expression(debugger, "new A::CL()", "CL {A_var = 11.0000, arr = {0.0000, 1.0000, 2.0000}, arr_untyped = {0, 10000, ...}, this_ptr = ...}");
 	verify_expression(debugger, "new A::CL()->A_var", "11.0000");
@@ -845,6 +900,9 @@ static TestTask run_scopes_replay_coroutine()
 	verify_expression_invalid(debugger, "Waitframe()", "Cannot call Waitframe for expressions evaluated in the debugger");
 	verify_expression_invalid(debugger, "DebugFunctionCallsWaitframe1()", "Cannot call Waitframe for expressions evaluated in the debugger");
 	verify_expression_invalid(debugger, "DebugFunctionInfiniteLoop(true)", "Detected possible infinite loop, aborting function call");
+	// Quitting from an evaluated function must not quit the script the debugger is paused in.
+	verify_expression_invalid(debugger, "Quit()", "Cannot quit the script from an expression evaluated in the debugger");
+	verify_expression(debugger, "Game->LoadGenericData(Game->GetGenericScript(\"scopes\"))->Running", "true");
 
 	/*
 	int DebugFrames1(int a, int b)
@@ -870,7 +928,13 @@ static TestTask run_scopes_replay_coroutine()
 	verify_expression(debugger, "a", "2.0000");
 	verify_expression(debugger, "b", "5.0000");
 
+	// Both functions have their own `a`, with different values. Going from one function to the
+	// other is not a change to either, so this never pauses.
+	debugger->AddValueChangeBreakpoint("a");
+
 	co_await PlayAndWaitForPause(debugger);
+	assertEqual(debugger->current_stack_trace->frames.front().function_name, "DebugFrames2"s);
+	assertEqual(debugger->value_breakpoints[0].hit_value_display, ""s);
 
 	verify_expression(debugger, "a", "3.0000");
 	verify_expression(debugger, "b", "6.0000");
@@ -883,6 +947,7 @@ static TestTask run_scopes_replay_coroutine()
 	verify_expression(debugger, "c", "7.0000");
 
 	co_await PlayAndWaitForPause(debugger);
+	assertEqual(debugger->value_breakpoints[0].hit_value_display, ""s);
 
 	verify_expression(debugger, "a", "2.0000");
 	verify_expression(debugger, "b", "5.0000");
@@ -1017,8 +1082,10 @@ static TestTask run_call_limit_replay_coroutine()
 	assertTrue(std::ranges::none_of(debugger->breakpoints_deduped, [](auto& bp){ return bp.source_file; }));
 	debugger->Init();
 
+	// The recursion never returns, so stepping out of it runs until the script is stopped for
+	// calling too deep. See the check after this replay ends.
 	debugger->RemoveBreakpoints();
-	debugger->SetState(Debugger::State::Playing);
+	debugger->SetState(Debugger::State::StepOut);
 }
 
 // Plays a replay, driving `task` once per frame until it finishes.
@@ -1115,7 +1182,12 @@ TestResults test_debugger([[maybe_unused]] bool verbose)
 	});
 
 	TEST("call_limit.zplay", tr, [](){
-		return run_replay_test(run_call_limit_replay_coroutine(), test_dir + "/replays/playground/auto_call_limit.zplay");
+		bool success = run_replay_test(run_call_limit_replay_coroutine(), test_dir + "/replays/playground/auto_call_limit.zplay");
+		// The test left the debugger stepping out of a script that then ended. Nothing is left to
+		// step through, so the debugger must have gone back to just playing. The game exits right
+		// after that script ends, so this can only be checked here.
+		assertTrue(zscript_debugger_open()->state == Debugger::State::Playing);
+		return success;
 	});
 
 	return tr;

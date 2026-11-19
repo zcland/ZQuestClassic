@@ -1,6 +1,7 @@
 #include "zc/debugger/debugger.h"
 
 #include "base/expected.h"
+#include "base/general.h"
 #include "zalleg/new_menu.h"
 #include "core/qst.h"
 #include "base/util.h"
@@ -113,6 +114,25 @@ std::string GetScriptTypeName(ScriptType type)
 		default:
 			return "UNKNOWN";
 	}
+}
+
+// The data of the running script (including one that is waiting for a later frame) with this
+// refInfo, if any. Only compares the pointer, so it's safe to give one that was since destroyed.
+ScriptEngineData* FindRunningScriptData(const refInfo* script_ri)
+{
+	for (auto& named_data : active_object_dtor_script_datas)
+	{
+		if (&named_data->data->ref == script_ri)
+			return named_data->data.get();
+	}
+
+	for (auto& data : scriptEngineDatas | std::views::values)
+	{
+		if (data.initialized && &data.ref == script_ri)
+			return &data;
+	}
+
+	return nullptr;
 }
 
 } // end namespace
@@ -466,26 +486,7 @@ Breakpoint* Debugger::CheckValueChangeBreakpoints(pc_t pc)
 	if (ri != value_bp_cached_ri)
 	{
 		value_bp_cached_ri = ri;
-		value_bp_cached_data = nullptr;
-		for (auto& named_data : active_object_dtor_script_datas)
-		{
-			if (&named_data->data->ref == ri)
-			{
-				value_bp_cached_data = named_data->data.get();
-				break;
-			}
-		}
-		if (!value_bp_cached_data)
-		{
-			for (auto& data : scriptEngineDatas | std::views::values)
-			{
-				if (&data.ref == ri)
-				{
-					value_bp_cached_data = &data;
-					break;
-				}
-			}
-		}
+		value_bp_cached_data = FindRunningScriptData(ri);
 	}
 
 	ScriptEngineData* prev_data = vm.current_data;
@@ -501,12 +502,37 @@ Breakpoint* Debugger::CheckValueChangeBreakpoints(pc_t pc)
 		if (!bp.enabled || !bp.parsed_expression)
 			continue;
 
+		// The call that the last value's local variables belong to has returned. A later call has
+		// its own, even if it is to the same function.
+		if (bp.last_value_owner.stack_ri == ri && ri->retsp < bp.last_value_owner.stack_retsp)
+		{
+			bp.last_value.reset();
+			bp.last_value_serialized.reset();
+			bp.last_value_owner = {};
+		}
+
 		std::optional<DebugValue> value;
+		eval.read_stack_variable = false;
+		eval.read_script_variable = false;
+		eval.read_this_object = false;
 		try {
 			value = eval.evaluate(bp.parsed_expression);
 		} catch (const std::exception&) {
 			continue;
 		}
+
+		Breakpoint::ValueOwner owner;
+		if (eval.read_stack_variable)
+		{
+			owner.stack_ri = ri;
+			owner.stack_retsp = ri->retsp;
+		}
+		if (eval.read_script_variable)
+			owner.script_ri = ri;
+		if (eval.read_this_object)
+			owner.this_object = vm.getThisPointer();
+		bool same_owner = owner == bp.last_value_owner;
+		bp.last_value_owner = owner;
 
 		const DebugType* type = value->type->asNonConst(zasm_debug_data);
 		bool serialize = type->isArray(zasm_debug_data) || type->isClass(zasm_debug_data);
@@ -516,7 +542,7 @@ Breakpoint* Debugger::CheckValueChangeBreakpoints(pc_t pc)
 		if (serialize)
 		{
 			std::string serialized = ValueToStringFull(*value);
-			changed = bp.last_value_serialized && *bp.last_value_serialized != serialized;
+			changed = same_owner && bp.last_value_serialized && *bp.last_value_serialized != serialized;
 			display = std::move(serialized);
 			bp.last_value_serialized = display;
 			bp.last_value.reset();
@@ -524,7 +550,7 @@ Breakpoint* Debugger::CheckValueChangeBreakpoints(pc_t pc)
 		else
 		{
 			display = ValueToStringSummary(*value);
-			changed = bp.last_value && *bp.last_value != value->raw_value;
+			changed = same_owner && bp.last_value && *bp.last_value != value->raw_value;
 			bp.last_value = value->raw_value;
 			bp.last_value_serialized.reset();
 		}
@@ -875,6 +901,16 @@ void Debugger::SetState(State new_state)
 	UpdateVariables();
 }
 
+void Debugger::RequestState(State new_state)
+{
+	if (new_state == target_state)
+		return;
+
+	target_state = new_state;
+	close_all_menu();
+	system_menu_close_requested = true;
+}
+
 void Debugger::SetSelectedScriptIndex(int index)
 {
 	selected_script = &active_scripts[index];
@@ -923,27 +959,6 @@ const Variable* Debugger::FindVariable(const std::string& name) const
 
 void Debugger::UpdateVariables()
 {
-	auto CreateVariable = [&](DebugValue value, std::string name){
-		// Discard const-ness.
-		value.type = value.type->asNonConst(zasm_debug_data);
-		std::string value_str = ValueToStringSummary(value);
-
-		bool expandable = false;
-		if (value.type->isArray(zasm_debug_data) && value.type->extra != TYPE_CHAR32)
-		{
-			expandable = value.raw_value != 0;
-		}
-		else if (value.type->isClass(zasm_debug_data))
-		{
-			expandable = !IsNull(value.raw_value, zasm_debug_data.getTypeName(value.type));
-		}
-
-		ImU32 color = GetColorForType(text_editor.GetPalette(), value.type);
-		Variable var(value, name, value_str, color);
-		var.is_expandable = expandable;
-		return var;
-	};
-
 	variables_version++;
 	variable_groups.clear();
 
@@ -971,7 +986,7 @@ void Debugger::UpdateVariables()
 				continue;
 
 			DebugValue value = eval.readSymbol(symbol);
-			Variable var = CreateVariable(value, symbol->name);
+			Variable var = CreateVariableFromValue(symbol->name, value);
 			var.symbol = symbol;
 
 			if (symbol->storage == LOC_GLOBAL)
@@ -1004,12 +1019,12 @@ void Debugger::UpdateVariables()
 	{
 		if (watch.expression.empty())
 		{
-			Variable var = CreateVariable(watch.value, watch.value_label);
+			Variable var = CreateVariableFromValue(watch.value_label, watch.value);
 			watch_variables.push_back(var);
 		}
 		else if (auto v = Evaluate(watch.expression, true))
 		{
-			Variable var = CreateVariable(v.value(), watch.expression);
+			Variable var = CreateVariableFromValue(watch.expression, v.value());
 			watch_variables.push_back(var);
 		}
 		else
@@ -1033,21 +1048,13 @@ void Debugger::FetchChildren(Variable& var)
 		auto* array = checkArray(var.value.raw_value, true);
 		if (!array) return;
 
-		if (auto values = vm.readArray(DebugValue{var.value.raw_value, var.value.type}))
+		if (auto values = vm.readArray(var.value))
 		{
 			for (int i = 0; i < values->size(); i++)
 			{
-				DebugValue value = values->at(i);
-				std::string val_str = ValueToStringSummary(value);
-				int elem_val = value.raw_value;
-				const DebugType* elem_type = value.type->asNonConst(zasm_debug_data);
-				bool is_expandable = (elem_type->tag == TYPE_ARRAY && elem_type->extra != TYPE_CHAR32) 
-								|| (elem_type->tag == TYPE_CLASS && elem_val != 0);
-
-				Variable child(value, fmt::format("[{}]", i), val_str, var.color);
-				child.is_expandable = is_expandable;
-
-				var.children.push_back(child);
+				Variable child = CreateVariableFromValue(fmt::format("[{}]", i), values->at(i));
+				child.color = var.color;
+				var.children.push_back(std::move(child));
 			}
 		}
 	}
@@ -1076,14 +1083,11 @@ void Debugger::FetchChildren(Variable& var)
 
 			if (auto v = vm.readObjectMember(var.value, symbol))
 			{
-				DebugValue& value = v.value();
-				const DebugType* type = value.type->asNonConst(zasm_debug_data);
-				std::string val_str = ValueToStringSummary(value);
-				Variable child(value, symbol->name, val_str, var.color);
-				bool is_expandable_type = (type->tag == TYPE_ARRAY && type->extra != TYPE_CHAR32) || type->tag == TYPE_CLASS;
-				child.is_expandable = is_expandable_type && !IsNull(value.raw_value, zasm_debug_data.getTypeName(value.type));
+				// Strips const from the member's declared type, like for any variable.
+				Variable child = CreateVariableFromValue(symbol->name, v.value());
+				child.color = var.color;
 				child.symbol = symbol;
-				var.children.push_back(child);
+				var.children.push_back(std::move(child));
 			}
 		}
 	}
@@ -1140,18 +1144,15 @@ std::string Debugger::ValueToStringSummary(DebugValue value)
 	{
 		auto scope = &zasm_debug_data.scopes[type->extra];
 		auto symbols = zasm_debug_data.getChildSymbols(scope);
-		bool isFixed = scope->type_id == TYPE_INT;
+		bool isFixed = !type->isLongValued(zasm_debug_data);
 		if (type->tag == TYPE_BITFLAGS && (!isFixed || (value.raw_value % FIXED_ONE) == 0))
 		{
 			std::string result;
-			uint32_t remaining = value.raw_value;
-			if (isFixed)
-				remaining /= FIXED_ONE;
+			// Divide while still signed: a negative value (ex. `~FLAG`) must keep its bits.
+			uint32_t remaining = isFixed ? value.raw_value / FIXED_ONE : value.raw_value;
 			for (auto s : symbols)
 			{
-				uint32_t flag = s->offset;
-				if (isFixed)
-					flag /= FIXED_ONE;
+				uint32_t flag = isFixed ? s->offset / FIXED_ONE : s->offset;
 
 				if (flag == 0) continue;
 
@@ -1226,15 +1227,36 @@ std::string Debugger::ValueToStringSummary(DebugValue value)
 	return fmt::format("{}", value.raw_value);
 }
 
+struct Debugger::PrintState
+{
+	// The arrays and objects currently being printed, outermost first. Each is its kind (-1 for an
+	// array, else its class - they have separate ids) and id.
+	std::vector<std::pair<int, int>> printing;
+	// How many more arrays and objects may be printed in full. Values that share many arrays and
+	// objects would otherwise print each of them again for every path there is to it.
+	int remaining = 2000;
+
+	// Whether to print this array or object in full, rather than as "...": not if it contains
+	// itself. If so, pop it from `printing` when done.
+	bool enter(std::pair<int, int> key)
+	{
+		if (util::contains(printing, key) || remaining-- <= 0)
+			return false;
+
+		printing.push_back(key);
+		return true;
+	}
+};
+
 // Returns a full recursive expansion of a value: scalars as in ValueToStringSummary, arrays with
 // all elements listed, class instances with all member fields expanded.
 // opts controls multiline formatting, array elision after 3 elements, and skipping deprecated
 // members.
 std::string Debugger::ValueToStringFull(DebugValue value, ValueStringOptions opts)
 {
-	std::set<int> seen;
+	PrintState state;
 	int depth = 0;
-	return ValueToStringHelper(value, opts, depth, seen);
+	return ValueToStringHelper(value, opts, depth, state);
 }
 
 std::string Debugger::ValueToStringTooltip(DebugValue value)
@@ -1266,7 +1288,7 @@ std::string Debugger::ValueToStringTooltip(DebugValue value)
 	return ValueToStringFull(value, opts);
 }
 
-std::string Debugger::ValueToStringHelper(DebugValue value, ValueStringOptions opts, int depth, std::set<int>& seen)
+std::string Debugger::ValueToStringHelper(DebugValue value, ValueStringOptions opts, int depth, PrintState& state)
 {
 	value.type = value.type->asNonConst(zasm_debug_data);
 	int raw_value = value.raw_value;
@@ -1284,10 +1306,9 @@ std::string Debugger::ValueToStringHelper(DebugValue value, ValueStringOptions o
 	{
 		if (!raw_value) return "null (Array)";
 
-		if (seen.contains(value.raw_value))
+		if (!state.enter({-1, raw_value}))
 			return "...";
-
-		seen.insert(value.raw_value);
+		ScopeExitHandler leave([&]{ state.printing.pop_back(); });
 
 		auto values = vm.readArray(value);
 		if (!values) return "invalid (Array)";
@@ -1319,7 +1340,7 @@ std::string Debugger::ValueToStringHelper(DebugValue value, ValueStringOptions o
 
 			for (size_t i = 0; i < values->size(); i++)
 			{
-				std::string item_str = ValueToStringHelper(values->at(i), opts, depth + 1, seen);
+				std::string item_str = ValueToStringHelper(values->at(i), opts, depth + 1, state);
 				if (i < values->size() - 1) item_str += ", ";
 
 				// If it's a complex type, it usually has its own newlines, so we just append.
@@ -1351,7 +1372,7 @@ std::string Debugger::ValueToStringHelper(DebugValue value, ValueStringOptions o
 		{
 			std::vector<std::string> parts;
 			for (size_t i = 0; i < values->size(); i++)
-				parts.push_back(ValueToStringHelper(values->at(i), opts, depth + 1, seen));
+				parts.push_back(ValueToStringHelper(values->at(i), opts, depth + 1, state));
 
 			result += fmt::format("{}", fmt::join(parts, ", "));
 			result += "}";
@@ -1372,8 +1393,9 @@ std::string Debugger::ValueToStringHelper(DebugValue value, ValueStringOptions o
 			return "null";
 		}
 
-		if (seen.contains(raw_value)) return "...";
-		seen.insert(raw_value);
+		if (!state.enter({(int)value.type->extra, raw_value}))
+			return "...";
+		ScopeExitHandler leave([&]{ state.printing.pop_back(); });
 
 		const DebugScope* scope = class_scope;
 		std::vector<const DebugScope*> scopes;
@@ -1437,7 +1459,7 @@ std::string Debugger::ValueToStringHelper(DebugValue value, ValueStringOptions o
 						elided_zero_count++;
 						continue;
 					}
-					fields.push_back({symbol->name, ValueToStringHelper(member_value, opts, depth + 1, seen)});
+					fields.push_back({symbol->name, ValueToStringHelper(member_value, opts, depth + 1, state)});
 				}
 			}
 
@@ -1490,7 +1512,7 @@ std::string Debugger::ValueToStringHelper(DebugValue value, ValueStringOptions o
 				if (auto v = vm.readObjectMember(value, symbol))
 				{
 					DebugValue& member_value = v.value();
-					std::string val_str = ValueToStringHelper(member_value, opts, depth + 1, seen);
+					std::string val_str = ValueToStringHelper(member_value, opts, depth + 1, state);
 					parts.push_back(symbol->name + " = " + val_str);
 				}
 			}
@@ -1660,9 +1682,11 @@ void zscript_debugger_update()
 	if (!debugger)
 		return;
 
-	// If the system menu is open, and the debugger state is modified, we want to close the menus.
-	if (debugger->state != debugger->target_state)
-		close_all_menu();
+	// A step only ends within the script being stepped. If that script ended first, it never
+	// will, so stop stepping.
+	bool is_stepping = debugger->state == Debugger::State::StepOver || debugger->state == Debugger::State::StepInto || debugger->state == Debugger::State::StepOut;
+	if (is_stepping && debugger->target_state == debugger->state && !FindRunningScriptData(debugger->last_ri))
+		debugger->SetState(Debugger::State::Playing);
 
 	if (!zscript_debugger_gui_update(debugger.get()))
 		zscript_debugger_close();

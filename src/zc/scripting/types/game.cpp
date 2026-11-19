@@ -723,7 +723,7 @@ void game_set_register(int32_t reg, int32_t value)
 
 		case COMBODDM:
 		{
-			value = vbound(value/10000,0,MAXCOMBOS);
+			value = vbound(value/10000,0,MAXCOMBOS-1);
 			auto result = ResolveGameScreens("Game->SetComboData");
 			if (result.canonical_rpos_handle)
 				result.canonical_rpos_handle.set_data(value);
@@ -799,6 +799,12 @@ void game_set_register(int32_t reg, int32_t value)
 				break;
 			}
 				
+			if(unsigned(value/10000) >= cMAX)
+			{
+				Z_scripterrlog("Invalid combo type (%d) passed to SetComboType", value/10000);
+				break;
+			}
+
 			int32_t cdata = TheMaps[screen].data[pos];
 			screen_combo_modify_pre(cdata);
 			combobuf[cdata].type=value/10000;
@@ -1242,7 +1248,7 @@ static ArrayRegistrar GAMEMISCSFX_registrar(GAMEMISCSFX, []{
 static ArrayRegistrar GAMEMISCSPR_registrar(GAMEMISCSPR, []{
 	static ScriptingArray_GlobalCArray impl(QMisc.sprites, comptime_array_size(QMisc.sprites));
 	impl.compatSetDefaultValue(-10000);
-	impl.setValueTransform(transforms::vboundWord);
+	impl.setValueTransform(transforms::vbound<0, MAXSPRITES-1>);
 	impl.setMul10000(true);
 	return &impl;
 }());
@@ -1334,6 +1340,7 @@ static ArrayRegistrar DMAPLEVELD_registrar(DMAPLEVELD, []{
 	);
 	impl.compatSetDefaultValue(-10000);
 	impl.setMul10000(true);
+	impl.setValueTransform(transforms::validate<MAXLEVELS>);
 	return &impl;
 }());
 

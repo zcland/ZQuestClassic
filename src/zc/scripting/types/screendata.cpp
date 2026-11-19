@@ -208,7 +208,7 @@ int32_t screendata_get_register(int32_t reg)
 		{
 			ret = 0;
 			int mi = mapind(cur_map, GET_REF(screenref));
-			if(mi < 0) break;
+			if(unsigned(mi) >= MAXSCRSNORMAL) break;
 			int dir = SH::read_stack(ri->sp+1) / 10000;
 			int ind = SH::read_stack(ri->sp+0) / 10000;
 			if(unsigned(dir) > 3)
@@ -240,7 +240,7 @@ int32_t screendata_get_register(int32_t reg)
 		case SCREENDATAGUYCOUNT:
 		{
 			int mi = mapind(cur_map, GET_REF(screenref));
-			if(mi < 0)
+			if(unsigned(mi) >= MAXSCRSNORMAL)
 				ret = -10000;
 			else ret = game->guys.get(mi) * 10000;
 			break;
@@ -457,7 +457,7 @@ void screendata_set_register(int32_t reg, int32_t value)
 		case SCREENDATAEXDOOR:
 		{
 			int mi = mapind(cur_map, GET_REF(screenref));
-			if(mi < 0) break;
+			if(unsigned(mi) >= MAXSCRSNORMAL) break;
 			int dir = SH::read_stack(ri->sp+1) / 10000;
 			int ind = SH::read_stack(ri->sp+0) / 10000;
 			if(unsigned(dir) > 3)
@@ -484,7 +484,7 @@ void screendata_set_register(int32_t reg, int32_t value)
 		case SCREENDATAGUYCOUNT:
 		{
 			int mi = mapind(cur_map, GET_REF(screenref));
-			if(mi > -1)
+			if(unsigned(mi) < MAXSCRSNORMAL)
 				game->guys[mi] = vbound(value/10000,10,0);
 			break;
 		}
@@ -589,8 +589,16 @@ void screendata_set_register(int32_t reg, int32_t value)
 			break;
 		}
 		case UNDERCOMBO:
-			scr->undercombo=value/10000;
+		{
+			int cid = value/10000;
+			if (unsigned(cid) >= MAXCOMBOS)
+			{
+				scripting_log_error_with_context("Invalid combo: {}", cid);
+				break;
+			}
+			scr->undercombo = cid;
 			break;
+		}
 		case UNDERCSET:
 			scr->undercset=value/10000;
 			break;
@@ -712,7 +720,7 @@ static ArrayRegistrar COMBOTD_registrar(COMBOTD, []{
 	);
 	impl.compatSetDefaultValue(-10000);
 	impl.setMul10000(true);
-	impl.setValueTransform(transforms::validate<256>);
+	impl.setValueTransform(transforms::validate<cMAX>);
 	return &impl;
 }());
 
@@ -956,6 +964,13 @@ static ArrayRegistrar SCREENDATALAYERMAP_registrar(SCREENDATALAYERMAP, []{
 		[](int ref, int index, int value){
 			if (auto scr = checkScreen(ref))
 			{
+				// Loading the screen reads the layer from this map.
+				if (value > map_count)
+				{
+					scripting_log_error_with_context("Invalid map: {} - there are {} maps", value, map_count);
+					return false;
+				}
+
 				scr->layermap[index - 1] = value;
 				mark_current_region_handles_dirty();
 				return true;
@@ -1049,14 +1064,14 @@ static ArrayRegistrar SCREENDATASIDEWARPSC_registrar(SCREENDATASIDEWARPSC, []{
 static ArrayRegistrar SCREENDATASIDEWARPDMAP_registrar(SCREENDATASIDEWARPDMAP, []{
 	static ScriptingArray_ObjectMemberCArray<screendata, &screendata::sidewarpdmap> impl;
 	impl.setMul10000(true);
-	impl.setValueTransform(transforms::vboundInt);
+	impl.setValueTransform(transforms::validate<MAXDMAPS>);
 	return &impl;
 }());
 
 static ArrayRegistrar SCREENDATASECRETCOMBO_registrar(SCREENDATASECRETCOMBO, []{
 	static ScriptingArray_ObjectMemberCArray<screendata, &screendata::secretcombo> impl;
 	impl.setMul10000(true);
-	impl.setValueTransform(transforms::vboundInt);
+	impl.setValueTransform(transforms::validate<MAXCOMBOS>);
 	return &impl;
 }());
 
@@ -1112,7 +1127,7 @@ static ArrayRegistrar SCREENDATAWARPRETY_registrar(SCREENDATAWARPRETY, []{
 static ArrayRegistrar SCREENDATATILEWARPDMAP_registrar(SCREENDATATILEWARPDMAP, []{
 	static ScriptingArray_ObjectMemberCArray<screendata, &screendata::tilewarpdmap> impl;
 	impl.setMul10000(true);
-	impl.setValueTransform(transforms::vboundInt);
+	impl.setValueTransform(transforms::validate<MAXDMAPS>);
 	return &impl;
 }());
 

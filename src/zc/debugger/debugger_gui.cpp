@@ -16,6 +16,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include <fmt/ranges.h>
@@ -203,7 +204,10 @@ void DrawVariableTooltip(Debugger* debugger, const Variable* var, const std::str
 	std::string type_name = zasm_debug_data.getTypeName(type);
 	if (type_name == "bitmap")
 	{
-		auto user_bitmap = checkBitmap(var->value.raw_value);
+		// The variable may be null or hold a freed bitmap, which is not a script error.
+		bool req_valid = false;
+		bool skip_error = true;
+		auto user_bitmap = checkBitmap(var->value.raw_value, req_valid, skip_error);
 		if (user_bitmap && user_bitmap->u_bmp && !tooltip_bmp)
 		{
 			int w = user_bitmap->u_bmp->w;
@@ -411,16 +415,14 @@ void DrawDebuggerControls(Debugger* debugger)
 	bool is_running = debugger->state == Debugger::State::Playing;
 	if (is_running)
 	{
-		// Don't call SetState directly, because we need to be within the script engine to get an
-		// accurate stack frame. Defer the actual call to zscript_debugger_exec.
 		if (ImGui::Button("||", btn_size) || ImGui::IsKeyPressed(ImGuiKey_F6))
-			debugger->target_state = Debugger::State::Paused;
+			debugger->RequestState(Debugger::State::Paused);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pause (F6)");
 	}
 	else
 	{
 		if (ImGui::Button("▶", btn_size) || ImGui::IsKeyPressed(ImGuiKey_F5))
-			debugger->target_state = Debugger::State::Playing;
+			debugger->RequestState(Debugger::State::Playing);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Continue (F5)");
 	}
 
@@ -429,19 +431,19 @@ void DrawDebuggerControls(Debugger* debugger)
 	ImGui::BeginDisabled(is_running);
 
 	if (ImGui::Button("➜", btn_size) || (!is_running && ImGui::IsKeyPressed(ImGuiKey_F10)))
-		debugger->target_state = Debugger::State::StepOver;
+		debugger->RequestState(Debugger::State::StepOver);
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Step Over (F10)");
 
 	ImGui::SameLine();
 
 	if (ImGui::Button("↓", btn_size) || (!is_running && ImGui::IsKeyPressed(ImGuiKey_F11) && !io.KeyShift))
-		debugger->target_state = Debugger::State::StepInto;
+		debugger->RequestState(Debugger::State::StepInto);
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Step Into (F11)");
 	
 	ImGui::SameLine();
 
 	if (ImGui::Button("↑", btn_size) || (!is_running && ImGui::IsKeyPressed(ImGuiKey_F11) && io.KeyShift))
-		debugger->target_state = Debugger::State::StepOut;
+		debugger->RequestState(Debugger::State::StepOut);
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Step Out (Shift+F11)");
 
 	ImGui::EndDisabled();
@@ -722,11 +724,19 @@ void DrawLeftPaneContent(Debugger* debugger)
 
 				ImGui::Text("%s", name.c_str());
 
+				// Variables are identified by name, so they stay expanded across steps. Names can
+				// repeat - across groups, and within one when a variable shadows another - so also
+				// identify each by its group and by how many of the same name came before it.
+				ImGui::PushID(name.c_str());
+				std::map<std::string_view, int> name_counts;
 				for (auto& var : variables)
 				{
+					ImGui::PushID(name_counts[var.name]++);
 					std::vector<Variable*> parents;
 					RenderDebugVariable(debugger, var, parents);
+					ImGui::PopID();
 				}
+				ImGui::PopID();
 			}
 		}
 		else

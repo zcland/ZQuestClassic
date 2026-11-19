@@ -66,6 +66,21 @@ struct Breakpoint
 	std::optional<int32_t> last_value;
 	std::optional<std::string> last_value_serialized;
 	std::string last_value_display;
+	// The call, script and object the last value was read from, for an expression that uses their
+	// variables. Values from different ones aren't compared.
+	struct ValueOwner
+	{
+		// The script and call depth of the call whose local variables were used.
+		const refInfo* stack_ri = nullptr;
+		uint32_t stack_retsp = 0;
+		// The script whose instance variables were used.
+		const refInfo* script_ri = nullptr;
+		// The `this` object whose members were used.
+		std::optional<int32_t> this_object;
+
+		bool operator==(const ValueOwner&) const = default;
+	};
+	ValueOwner last_value_owner;
 	// While paused due to this breakpoint, the new and previous values. Cleared on resume.
 	std::string hit_value_display;
 	std::string hit_value_prev_display;
@@ -168,6 +183,8 @@ struct Debugger
 
 	State state = State::Playing;
 	State target_state = State::Playing;
+	// Set when the menus are closed for a state change, for System() to also leave its own loop.
+	bool system_menu_close_requested = false;
 	// Cache mapping the engine's current refInfo to its ScriptEngineData, used when evaluating
 	// value-change breakpoints. See CheckValueChangeBreakpoints.
 	const refInfo* value_bp_cached_ri = nullptr;
@@ -232,6 +249,9 @@ struct Debugger
 	void SetSourceFileAndLine(const SourceFile* source_file, int line);
 	void UpdateActiveScripts();
 	void SetState(State new_state);
+	// Changes the state once a script next runs: only from within the script engine is there an
+	// accurate call stack. Closes the system menus, so the game resumes and one can.
+	void RequestState(State new_state);
 	void SetSelectedScriptIndex(int index);
 	void SetSelectedStackFrameIndex(int index);
 	const Variable* FindVariable(const std::string& name) const;
@@ -247,7 +267,8 @@ struct Debugger
 	std::string ValueToStringTooltip(DebugValue value);
 
 private:
-	std::string ValueToStringHelper(DebugValue value, ValueStringOptions opts, int depth, std::set<int>& seen);
+	struct PrintState;
+	std::string ValueToStringHelper(DebugValue value, ValueStringOptions opts, int depth, PrintState& state);
 	Variable CreateVariableFromValue(const std::string& name, DebugValue value);
 	void RenderVariableNode(Variable& var, std::vector<Variable*>& parents);
 };

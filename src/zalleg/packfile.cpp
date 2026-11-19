@@ -568,7 +568,8 @@ bool p_getlstr(string *str, PACKFILE *f)
 		return false;
 	if(sz)
 	{
-		str->reserve(sz);
+		// No reserve here: the size comes from the file, and allocate_string_buffer is what
+		// rejects one far too large.
 		auto buf = allocate_string_buffer(sz);
 		if (!buf.has_value())
 			return false;
@@ -580,7 +581,7 @@ bool p_getlstr(string *str, PACKFILE *f)
 }
 bool p_putlstr(string const& str, PACKFILE *f)
 {
-	dword sz = word(zc_min(UINT32_MAX,str.size()));
+	dword sz = dword(std::min<size_t>(UINT32_MAX,str.size()));
 	if(!p_iputl(sz,f))
 		return false;
 	if(sz)

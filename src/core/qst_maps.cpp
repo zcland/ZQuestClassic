@@ -496,6 +496,9 @@ int32_t readmapscreen_old(PACKFILE *f, zquestheader *Header, mapscr *temp_mapscr
 			{
 				return qe_invalid;
 			}
+			// Only a damaged quest has a dmap past the last one.
+			if(temp_mapscr->tilewarpdmap[i] >= MAXDMAPS)
+				temp_mapscr->tilewarpdmap[i] = 0;
 		}
 	}
 	
@@ -607,7 +610,7 @@ int32_t readmapscreen_old(PACKFILE *f, zquestheader *Header, mapscr *temp_mapscr
 			}
 		}
 		//don't read in any invalid data
-		if ( ((unsigned)temp_mapscr->enemy[k]) > MAXGUYS )
+		if ( ((unsigned)temp_mapscr->enemy[k]) >= MAXGUYS )
 		{
 			al_trace("Tried to read an invalid enemy ID (%d) for enemy[%d]. This has been cleared to 0.\n", temp_mapscr->enemy[k], k);
 			temp_mapscr->enemy[k] = 0;
@@ -729,6 +732,9 @@ int32_t readmapscreen_old(PACKFILE *f, zquestheader *Header, mapscr *temp_mapscr
 			{
 				return qe_invalid;
 			}
+			// Only a damaged quest has a dmap past the last one.
+			if(temp_mapscr->sidewarpdmap[i] >= MAXDMAPS)
+				temp_mapscr->sidewarpdmap[i] = 0;
 		}
 	}
 	
@@ -1736,6 +1742,8 @@ int32_t readmapscreen(PACKFILE *f, zquestheader *Header, mapscr *temp_mapscr, wo
 			{
 				if(!p_igetw(&(temp_mapscr->tilewarpdmap[i]),f))
 					return qe_invalid;
+				if(temp_mapscr->tilewarpdmap[i] >= MAXDMAPS)
+					temp_mapscr->tilewarpdmap[i] = 0;
 			}
 			for(int32_t i=0; i<4; i++)
 			{
@@ -1756,6 +1764,8 @@ int32_t readmapscreen(PACKFILE *f, zquestheader *Header, mapscr *temp_mapscr, wo
 			{
 				if(!p_igetw(&(temp_mapscr->sidewarpdmap[i]),f))
 					return qe_invalid;
+				if(temp_mapscr->sidewarpdmap[i] >= MAXDMAPS)
+					temp_mapscr->sidewarpdmap[i] = 0;
 			}
 			for(int32_t i=0; i<4; i++)
 			{
@@ -1879,7 +1889,7 @@ int32_t readmapscreen(PACKFILE *f, zquestheader *Header, mapscr *temp_mapscr, wo
 			{
 				if(!p_igetw(&(temp_mapscr->enemy[k]),f))
 					return qe_invalid;
-				if (unsigned(temp_mapscr->enemy[k]) > MAXGUYS)
+				if (unsigned(temp_mapscr->enemy[k]) >= MAXGUYS)
 					temp_mapscr->enemy[k] = 0;
 			}
 			if(!p_getc(&(temp_mapscr->pattern),f))
@@ -2343,6 +2353,20 @@ int32_t readmaps(PACKFILE *f, zquestheader *Header)
 					TheMaps[screen].secretflag[k]=tcmbflag2(i, pos);
 					TheMaps[screen].secretcombo[k]=tcmbdat2(i, j, pos);
 				}
+			}
+		}
+	}
+	if (!should_skip)
+	{
+		// A layer on a map past the last one would read past the maps when the screen loads. A
+		// damaged quest can have one, and so can the editor's: lowering the map count only fixes
+		// the current screen's layers, and the others when they are next viewed (fix_layers).
+		for (auto& scr : TheMaps)
+		{
+			for (int k = 0; k < 6; ++k)
+			{
+				if (scr.layermap[k] && (scr.layermap[k] - 1) * MAPSCRS + scr.layerscreen[k] >= (int)TheMaps.size())
+					scr.layermap[k] = 0;
 			}
 		}
 	}
