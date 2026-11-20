@@ -295,9 +295,9 @@ script_array* create_script_array()
 	return script_arrays.create();
 }
 
-void register_existing_script_array(script_array* array)
+bool register_existing_script_array(script_array* array)
 {
-	script_arrays.register_existing(array);
+	return script_arrays.register_existing(array);
 }
 
 std::vector<script_array*> get_script_arrays()
@@ -5340,7 +5340,7 @@ void FFScript::do_loaddropset(const bool v)
 {
 	int32_t ID = SH::get_arg(sarg1, v) / 10000;
 	
-	if ( ID < 0 || ID > MAXITEMDROPSETS )
+	if ( ID < 0 || ID >= MAXITEMDROPSETS )
 	{
 		scripting_log_error_with_context("Invalid Dropset ID: {}", ID);
 		ri->dropsetdataref() = MAX_DWORD;
@@ -9867,6 +9867,18 @@ int32_t run_script(ScriptType type, word script, int32_t i)
 		~RestoreZasmCommand() { current_zasm_command = prev; }
 	} _restore_zasm_command;
 
+	// A script can also run inside another script's command: generic scripts run during the frames
+	// that commands like Screen->ZapOut() run, and commands throw generic script events. Put the
+	// outer script's state back afterwards, or it goes on running with this script's position,
+	// registers and stack. Top-level runs are left alone, since the state they leave behind is
+	// what error logs read between frames.
+	struct NestedScriptScope
+	{
+		std::optional<ScriptExecState> saved;
+		NestedScriptScope() { if (script_run_depth > 0) saved = ScriptExecState::save(); }
+		~NestedScriptScope() { if (saved) saved->restore(); }
+	} _nested_script_scope;
+
 	struct ScriptRunDepthScope
 	{
 		ScriptRunDepthScope() { ++script_run_depth; }
@@ -14220,43 +14232,30 @@ int32_t run_script_int(JittedScriptInstance* j_instance)
 	return RUNSCRIPT_OK;
 }
 
+// The script for an object destructor to run in. `script` and `i` can come from a save file, so
+// neither is trusted. Returns nullptr if there is no such script (or sprite).
 script_data* load_scrdata(ScriptType type, word script, int32_t i)
 {
+	sprite_list* sprites = nullptr;
 	switch(type)
 	{
-		case ScriptType::FFC:
-			return ffscripts[script];
-		case ScriptType::NPC:
-			return guyscripts[guys.getByUID(i)->scrconfig.script];
-		case ScriptType::Lwpn:
-			return lwpnscripts[Lwpns.getByUID(i)->scrconfig.script];
-		case ScriptType::Ewpn:
-			return ewpnscripts[Ewpns.getByUID(i)->scrconfig.script];
-		case ScriptType::ItemSprite:
-			return itemspritescripts[items.getByUID(i)->scrconfig.script];
-		case ScriptType::Item:
-			return itemscripts[script];
-		case ScriptType::Global:
-			return globalscripts[script];
-		case ScriptType::Generic:
-		case ScriptType::GenericFrozen:
-			return genericscripts[script];
-		case ScriptType::Hero:
-			return playerscripts[script];
-		case ScriptType::DMap:
-			return dmapscripts[script];
-		case ScriptType::OnMap:
-		case ScriptType::ScriptedActiveSubscreen:
-		case ScriptType::ScriptedPassiveSubscreen:
-			return dmapscripts[script];
-		case ScriptType::Screen:
-			return screenscripts[script];
-		case ScriptType::Combo:
-			return comboscripts[script];
-		case ScriptType::EngineSubscreen:
-			return subscreenscripts[script];
+		case ScriptType::NPC: sprites = &guys; break;
+		case ScriptType::Lwpn: sprites = &Lwpns; break;
+		case ScriptType::Ewpn: sprites = &Ewpns; break;
+		case ScriptType::ItemSprite: sprites = &items; break;
+		default: break;
 	}
-	return nullptr;
+
+	// For a sprite, the script is the one the sprite runs.
+	if (sprites)
+	{
+		sprite* spr = sprites->getByUID(i);
+		if (!spr)
+			return nullptr;
+		script = spr->scrconfig.script;
+	}
+
+	return get_script_safe(type, script);
 }
 
 //This keeps ffc scripts running beyond the first frame. 
@@ -17227,7 +17226,7 @@ void FFScript::do_varg_makearray(ScriptType type, const uint32_t UID, script_obj
 	}
 
 	dword ptrval;
-	for(ptrval = 1; localRAM[ptrval].Valid(); ptrval++) ;
+	for(ptrval = 1; ptrval < NUM_ZSCRIPT_ARRAYS && localRAM[ptrval].Valid(); ptrval++) ;
 	
 	if(ptrval >= NUM_ZSCRIPT_ARRAYS)
 	{

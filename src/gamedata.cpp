@@ -81,8 +81,8 @@ void gamedata::load_user_objects()
 	for (const saved_user_object& obj : compat_saved_user_objects)
 	{
 		auto object = new user_object{obj.obj};
-		register_existing_user_object(object);
-		object->load_arrays(obj.held_arrays);
+		if (register_existing_user_object(object))
+			object->load_arrays(obj.held_arrays);
 	}
 #endif
 }
@@ -634,7 +634,8 @@ void gamedata::change_continue_scrn(int16_t s)
 
 word gamedata::get_continue_dmap() const
 {
-    return _continue_dmap;
+	// The save file, the quest's start dmap and scripts can all set any number.
+	return _continue_dmap < MAXDMAPS ? _continue_dmap : 0;
 }
 void gamedata::set_continue_dmap(word d)
 {
